@@ -86,6 +86,8 @@ pub struct LiveGameState {
     pub held_item: Option<String>,
     pub held_raw: Option<String>,
     pub held_damage: i32,
+    pub selected_slot: u8,
+    pub looking_at_raw: Option<String>,
     pub looking_at_kind: String,
     pub looking_at_label: Option<String>,
     pub looking_at_hp: Option<f32>,
@@ -281,6 +283,9 @@ fn parse_state(v: &Value, dst: &mut LiveGameState) {
     dst.raining = v["weather"]["raining"].as_bool().unwrap_or(false);
     dst.thundering = v["weather"]["thundering"].as_bool().unwrap_or(false);
 
+    if let Some(sel) = v.get("selected").and_then(|x| x.as_u64()) {
+        dst.selected_slot = sel.clamp(1, 9) as u8;
+    }
     if let Some(held) = v.get("held").and_then(|x| x.as_object()) {
         let raw = held.get("item").and_then(|x| x.as_str()).map(str::to_string);
         dst.held_item = raw.as_deref().map(short_item_name);
@@ -291,7 +296,6 @@ fn parse_state(v: &Value, dst: &mut LiveGameState) {
         dst.held_raw = None;
         dst.held_damage = 0;
     }
-
     let look_kind = v["looking_at"]["kind"].as_str().unwrap_or("none");
     dst.looking_at_kind = look_kind.to_string();
     match look_kind {
@@ -306,13 +310,14 @@ fn parse_state(v: &Value, dst: &mut LiveGameState) {
                 .as_f64()
                 .unwrap_or(99.0);
             dst.looking_at_label = ty;
+            dst.looking_at_raw = None;
             dst.looking_at_hp = hp;
             dst.looking_at_dist = d;
         }
         "block" => {
-            dst.looking_at_label = v["looking_at"]["block"]["block"]
-                .as_str()
-                .map(short_item_name);
+            let raw_b = v["looking_at"]["block"]["block"].as_str();
+            dst.looking_at_raw = raw_b.map(str::to_string);
+            dst.looking_at_label = raw_b.map(short_item_name);
             dst.looking_at_hp = None;
             dst.looking_at_dist = v["looking_at"]["block"]["distance"]
                 .as_f64()
@@ -320,6 +325,7 @@ fn parse_state(v: &Value, dst: &mut LiveGameState) {
         }
         _ => {
             dst.looking_at_label = None;
+            dst.looking_at_raw = None;
             dst.looking_at_hp = None;
             dst.looking_at_dist = 99.0;
         }
@@ -437,6 +443,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     let mut was_mining = false;
     let mut last_haste_at = Instant::now() - Duration::from_secs(10);
     let mut last_haste_amp: u32 = u32::MAX;
+    let mut last_tool_switch = Instant::now() - Duration::from_secs(5);
     let mut conn_misses: u32 = 0;
     let mut last_respawn = Instant::now() - Duration::from_secs(5);
     let mut last_eat = Instant::now() - Duration::from_secs(5);
@@ -549,8 +556,13 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             continue;
         }
 
-        let need_inv = cfg.hud_vitals.enabled || cfg.auto_totem || cfg.auto_eat;
-        if live_snapshot.in_world && need_inv && last_inv.elapsed() >= Duration::from_millis(800) {
+        let need_inv = cfg.hud_vitals.enabled || cfg.auto_totem || cfg.auto_eat || cfg.auto_tool;
+        let inv_interval = if cfg.auto_tool {
+            Duration::from_millis(450)
+        } else {
+            Duration::from_millis(800)
+        };
+        if live_snapshot.in_world && need_inv && last_inv.elapsed() >= inv_interval {
             last_inv = Instant::now();
             if let Some(v) = send_line(reader, writer, "inventory") {
                 if v.get("error").is_none() {
@@ -865,6 +877,46 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                 }
             }
         }
+        // 7b. AutoTool (switches to best hotbar tool before/while mining a block)
+        if cfg.auto_tool
+            && playing_now
+            && live_snapshot.looking_at_kind == "block"
+            && live_snapshot.looking_at_dist <= 4.8
+            && (lmb_down || cfg.auto_mine || now_mining)
+            && last_tool_switch.elapsed() >= Duration::from_millis(180)
+            && let Some(raw_block) = live_snapshot.looking_at_raw.as_deref()
+        {
+            let wanted = best_tool_kind(raw_block);
+            if wanted != ToolKind::Any {
+                let cur_score = live_snapshot
+                    .held_raw
+                    .as_deref()
+                    .map_or(0, |it| tool_score(it, wanted));
+                let mut best_slot: Option<(usize, i32)> = None;
+                for (idx, slot_item) in live_snapshot.hotbar_items.iter().enumerate() {
+                    let Some(it) = slot_item.as_deref() else {
+                        continue;
+                    };
+                    let sc = tool_score(it, wanted);
+                    if sc > cur_score && best_slot.is_none_or(|b| sc > b.1) {
+                        best_slot = Some((idx, sc));
+                    }
+                }
+                if let Some((idx, _)) = best_slot
+                    && (idx + 1) as u8 != live_snapshot.selected_slot
+                {
+                    last_tool_switch = Instant::now();
+                    if send_line(reader, writer, &format!("select {}", idx + 1)).is_none() {
+                        conn = None;
+                        continue;
+                    }
+                    live_snapshot.selected_slot = (idx + 1) as u8;
+                    live_snapshot.held_raw = live_snapshot.hotbar_items[idx].clone();
+                    live_snapshot.held_item = live_snapshot.held_raw.as_deref().map(short_item_name);
+                }
+            }
+        }
+
 
         // 8. AutoMine & SpeedMine
         if cfg.speed_mine && playing_now {
@@ -991,7 +1043,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             st.game = live_snapshot;
         }
 
-        let sleep_ms = if cfg.aim_assist || cfg.trigger_bot || cfg.auto_clicker || cfg.auto_mine || cfg.speed_mine {
+        let sleep_ms = if cfg.aim_assist || cfg.trigger_bot || cfg.auto_clicker || cfg.auto_mine || cfg.speed_mine || cfg.auto_tool {
             85
         } else {
             160
@@ -1041,6 +1093,236 @@ fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolKind {
+    Pickaxe,
+    Shovel,
+    Axe,
+    Hoe,
+    Shears,
+    Sword,
+    Any,
+}
+
+fn best_tool_kind(block_id: &str) -> ToolKind {
+    let id = block_id.strip_prefix("minecraft:").unwrap_or(block_id);
+    if id == "cobweb" || id == "bamboo" || id == "bamboo_sapling" {
+        return ToolKind::Sword;
+    }
+    if id.ends_with("_wool")
+        || id.ends_with("_leaves")
+        || matches!(
+            id,
+            "vine"
+                | "glow_lichen"
+                | "moss_carpet"
+                | "pale_moss_carpet"
+                | "hanging_roots"
+                | "seagrass"
+                | "tall_seagrass"
+                | "short_grass"
+                | "tall_grass"
+                | "fern"
+                | "large_fern"
+                | "dead_bush"
+        )
+    {
+        return ToolKind::Shears;
+    }
+    if matches!(
+        id,
+        "dirt"
+            | "grass_block"
+            | "podzol"
+            | "mycelium"
+            | "coarse_dirt"
+            | "rooted_dirt"
+            | "dirt_path"
+            | "farmland"
+            | "mud"
+            | "muddy_mangrove_roots"
+            | "clay"
+            | "sand"
+            | "red_sand"
+            | "suspicious_sand"
+            | "gravel"
+            | "suspicious_gravel"
+            | "soul_sand"
+            | "soul_soil"
+            | "snow"
+            | "snow_block"
+            | "powder_snow"
+    ) || id.ends_with("_concrete_powder")
+    {
+        return ToolKind::Shovel;
+    }
+    if matches!(
+        id,
+        "hay_block"
+            | "target"
+            | "sponge"
+            | "wet_sponge"
+            | "nether_wart_block"
+            | "warped_wart_block"
+            | "shroomlight"
+            | "dried_kelp_block"
+            | "moss_block"
+            | "pale_moss_block"
+            | "sculk"
+            | "sculk_sensor"
+            | "calibrated_sculk_sensor"
+            | "sculk_catalyst"
+            | "sculk_shrieker"
+            | "sculk_vein"
+    ) {
+        return ToolKind::Hoe;
+    }
+    if id.ends_with("_log")
+        || id.ends_with("_wood")
+        || id.ends_with("_stem")
+        || id.ends_with("_hyphae")
+        || id.ends_with("_planks")
+        || id.ends_with("_fence")
+        || id.ends_with("_fence_gate")
+        || id.ends_with("_door")
+        || id.ends_with("_trapdoor")
+        || id.ends_with("_sign")
+        || id.ends_with("_hanging_sign")
+        || id.ends_with("_shelf")
+        || matches!(
+            id,
+            "chest"
+                | "trapped_chest"
+                | "barrel"
+                | "crafting_table"
+                | "bookshelf"
+                | "chiseled_bookshelf"
+                | "lectern"
+                | "ladder"
+                | "pumpkin"
+                | "carved_pumpkin"
+                | "jack_o_lantern"
+                | "melon"
+                | "bamboo_block"
+                | "stripped_bamboo_block"
+                | "beehive"
+                | "bee_nest"
+                | "composter"
+                | "jukebox"
+                | "note_block"
+                | "loom"
+                | "cartography_table"
+                | "smithing_table"
+                | "fletching_table"
+                | "campfire"
+                | "soul_campfire"
+                | "mangrove_roots"
+        )
+    {
+        return ToolKind::Axe;
+    }
+    if id.contains("stone")
+        || id.contains("deepslate")
+        || id.contains("_ore")
+        || id.contains("brick")
+        || id.contains("terracotta")
+        || id.contains("concrete")
+        || id.contains("prismarine")
+        || id.contains("copper")
+        || id.contains("iron")
+        || id.contains("gold")
+        || id.contains("diamond")
+        || id.contains("emerald")
+        || id.contains("lapis")
+        || id.contains("redstone")
+        || id.contains("quartz")
+        || id.contains("amethyst")
+        || id.contains("basalt")
+        || id.contains("blackstone")
+        || id.contains("andesite")
+        || id.contains("diorite")
+        || id.contains("granite")
+        || id.contains("tuff")
+        || id.contains("calcite")
+        || id.contains("obsidian")
+        || id.contains("shulker_box")
+        || id.contains("anvil")
+        || id.contains("rail")
+        || id.contains("ice")
+        || matches!(
+            id,
+            "netherrack"
+                | "ancient_debris"
+                | "netherite_block"
+                | "coal_block"
+                | "magma_block"
+                | "furnace"
+                | "blast_furnace"
+                | "smoker"
+                | "hopper"
+                | "dispenser"
+                | "dropper"
+                | "observer"
+                | "piston"
+                | "sticky_piston"
+                | "ender_chest"
+                | "spawner"
+                | "lantern"
+                | "soul_lantern"
+                | "cauldron"
+                | "bell"
+                | "lodestone"
+                | "respawn_anchor"
+                | "enchanting_table"
+                | "brewing_stand"
+                | "purpur_block"
+                | "purpur_pillar"
+                | "bone_block"
+                | "pointed_dripstone"
+                | "dripstone_block"
+        )
+    {
+        return ToolKind::Pickaxe;
+    }
+    ToolKind::Any
+}
+
+fn tool_score(item_id: &str, wanted: ToolKind) -> i32 {
+    let id = item_id.strip_prefix("minecraft:").unwrap_or(item_id);
+    let matches_kind = match wanted {
+        ToolKind::Pickaxe => id.ends_with("_pickaxe"),
+        ToolKind::Shovel => id.ends_with("_shovel"),
+        ToolKind::Axe => id.ends_with("_axe"),
+        ToolKind::Hoe => id.ends_with("_hoe"),
+        ToolKind::Shears => id == "shears",
+        ToolKind::Sword => id.ends_with("_sword"),
+        ToolKind::Any => false,
+    };
+    if !matches_kind {
+        return 0;
+    }
+    if id == "shears" {
+        return 50;
+    }
+    if id.starts_with("netherite_") {
+        60
+    } else if id.starts_with("diamond_") {
+        50
+    } else if id.starts_with("iron_") {
+        40
+    } else if id.starts_with("copper_") {
+        32
+    } else if id.starts_with("stone_") {
+        30
+    } else if id.starts_with("golden_") {
+        25
+    } else if id.starts_with("wooden_") {
+        15
+    } else {
+        10
+    }
 }
 
 fn storage_targets() -> &'static [(&'static str, OreKind)] {

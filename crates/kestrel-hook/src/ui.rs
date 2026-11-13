@@ -1163,7 +1163,31 @@ fn render_automation_tab(
         focusables,
     );
 
-    y + 112.0
+    y += 122.0;
+
+    let at_r = Rect::new(x, y, w, 54.0);
+    dl.rect_border(at_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(atlas, FontKind::UiSemi, at_r.x + 16.0, at_r.y + 9.0, "AutoTool", palette::TEXT_PRIMARY);
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        at_r.x + 16.0,
+        at_r.y + 29.0,
+        "Switches hotbar slot to the best tool when mining a block.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(at_r.x + w - 82.0, at_r.y + 13.0, 66.0, 28.0),
+        st.config.auto_tool,
+        FocusId::AutoToolToggle,
+        focusables,
+    );
+
+    y + 54.0
+
 
 }
 
@@ -1589,7 +1613,7 @@ fn render_search_results(
     );
     y += 24.0;
 
-    let items: [(&str, &str, bool, FocusId); 26] = [
+    let items: [(&str, &str, bool, FocusId); 27] = [
         ("Fullbright", "Lights up dark caves and night areas", st.config.fullbright_enabled, FocusId::FullbrightToggle),
         ("Ore X-Ray (3D ESP)", "Spot buried Diamond, Debris, Gold, Iron", st.config.xray_ores, FocusId::XrayOresToggle),
         ("Cave Wireframe", "See underground tunnels and lava pockets", st.config.xray_terrain, FocusId::XrayTerrainToggle),
@@ -1609,6 +1633,7 @@ fn render_search_results(
         ("AutoClicker", "Clicks continuously while holding attack", st.config.auto_clicker, FocusId::AutoClickerToggle),
         ("AutoMine", "Automatically holds mine on aimed blocks", st.config.auto_mine, FocusId::AutoMineToggle),
         ("SpeedMine", "Breaks blocks faster with minimal delay", st.config.speed_mine, FocusId::SpeedMineToggle),
+        ("AutoTool", "Switches hotbar slot to the best mining tool", st.config.auto_tool, FocusId::AutoToolToggle),
         ("AntiAFK", "Taps sneak when idle to avoid AFK kick", st.config.anti_afk, FocusId::AntiAfkToggle),
         ("OptiZoom", "Hold key to zoom in", st.config.zoom_enabled, FocusId::ZoomToggle),
         ("Crosshair+", "Custom reticle overlay", st.config.crosshair_enabled, FocusId::CrosshairToggle),
@@ -2365,6 +2390,7 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.anti_afk = false;
             st.config.auto_mine = false;
             st.config.speed_mine = false;
+            st.config.auto_tool = false;
             st.lightmap_dirty = true;
             st.set_toast("Panic: all survival/combat modules disabled");
         }
@@ -2463,6 +2489,9 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         }
         FocusId::SpeedMineToggle => {
             st.config.speed_mine = !st.config.speed_mine;
+        }
+        FocusId::AutoToolToggle => {
+            st.config.auto_tool = !st.config.auto_tool;
         }
         FocusId::SpeedMinePowerSlider => {}
         FocusId::AimTargetCycle => {

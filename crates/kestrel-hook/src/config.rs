@@ -178,6 +178,7 @@ pub struct KestrelConfig {
     pub auto_mine: bool,
     pub speed_mine: bool,
     pub speed_mine_power: u32,
+    pub auto_tool: bool,
 
     pub waypoints: Vec<Waypoint>,
 }
@@ -274,6 +275,7 @@ impl Default for KestrelConfig {
             auto_mine: false,
             speed_mine: false,
             speed_mine_power: 2,
+            auto_tool: false,
 
             waypoints: Vec::new(),
         }

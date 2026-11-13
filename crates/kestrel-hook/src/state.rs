@@ -116,6 +116,7 @@ pub enum FocusId {
     AutoMineToggle,
     SpeedMineToggle,
     SpeedMinePowerSlider,
+    AutoToolToggle,
     // Waypoints controls
     WaypointInput,
     WaypointAddHere,
