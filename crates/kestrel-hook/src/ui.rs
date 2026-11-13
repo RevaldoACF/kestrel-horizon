@@ -1,4 +1,7 @@
-use crate::config::{AimTarget, CrosshairStyle, FullbrightMode, KestrelConfig, OrePreset, Waypoint, XrayKey, ZoomKey};
+use crate::config::{
+    AimTarget, CrosshairStyle, FullbrightMode, KestrelConfig, OrePreset, PerfProfile, Waypoint,
+    XrayKey, ZoomKey,
+};
 use crate::control_bridge::{send_cmd, ControlCmd};
 use crate::draw::{palette, Color, DrawList, Rect};
 use crate::font::{FontAtlas, FontKind};
@@ -9,8 +12,8 @@ use std::time::Duration;
 #[derive(Clone, Copy)]
 enum ControlKind {
     Button,
-    Toggle(bool),
-    Slider(f32, f32, f32), // min, max, step
+    Toggle,
+    Slider(f32, f32, f32),
     Text(TextTarget),
 }
 
@@ -20,195 +23,190 @@ struct Focusable {
     kind: ControlKind,
 }
 
+fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
 pub fn render_menu(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     if !st.menu_open && st.menu_anim <= 0.01 {
+        st.dragging_menu = None;
         return;
     }
 
     let sw = st.screen_size[0].max(1) as f32;
     let sh = st.screen_size[1].max(1) as f32;
 
-    // Backdrop dim (scales smoothly with menu_anim)
-    let anim = st.menu_anim.clamp(0.0, 1.0);
-    dl.rect(
-        Rect::new(0.0, 0.0, sw, sh),
-        0.0,
-        Color::hex(0x05070A, 0.42 * anim),
-    );
+    let raw_anim = st.menu_anim.clamp(0.0, 1.0);
+    let anim = ease_out_cubic(raw_anim);
 
-    // Panel geometry responsive to window size
-    let panel_w = (sw - 48.0).clamp(640.0, 900.0);
-    let panel_h = (sh - 48.0).clamp(420.0, 580.0);
-    let px = ((sw - panel_w) * 0.5).round();
-    let py = ((sh - panel_h) * 0.5 + (1.0 - anim) * 14.0).round();
+    // Compact, breathable floating panel (no dark fullscreen scrim)
+    let base_w = (sw - 64.0).clamp(620.0, 800.0);
+    let base_h = (sh - 64.0).clamp(400.0, 524.0);
+
+    // Initialize or clamp draggable position
+    let [cur_x, cur_y] = st.menu_pos.unwrap_or([
+        ((sw - base_w) * 0.5).round(),
+        ((sh - base_h) * 0.5).round(),
+    ]);
+    let base_x = cur_x.clamp(12.0, (sw - base_w - 12.0).max(12.0));
+    let base_y = cur_y.clamp(12.0, (sh - base_h - 12.0).max(12.0));
+    st.menu_pos = Some([base_x, base_y]);
+
+    // Subtle scale + lift during open/close with ` or ~
+    let scale = 0.965 + 0.035 * anim;
+    let panel_w = (base_w * scale).round();
+    let panel_h = (base_h * scale).round();
+    let px = (base_x + (base_w - panel_w) * 0.5).round();
+    let py = (base_y + (base_h - panel_h) * 0.5 + (1.0 - anim) * 10.0).round();
     let panel = Rect::new(px, py, panel_w, panel_h);
 
-    // Single elevation shadow (R-12 dose cap)
-    dl.shadow(panel, 12.0, 22.0, palette::SHADOW.with_alpha(anim));
+    dl.shadow(panel, 10.0, 20.0, palette::SHADOW.with_alpha(anim));
     dl.rect_border(
         panel,
-        12.0,
+        10.0,
         palette::CANVAS.with_alpha(anim),
-        1.5,
-        palette::BORDER_STRONG.with_alpha(0.75 * anim),
+        1.0,
+        palette::BORDER.with_alpha(0.9 * anim),
     );
 
-    let mut focusables: Vec<Focusable> = Vec::with_capacity(32);
+    // Fade cleanly while closing without overflowing scissor during scale
+    if raw_anim < 0.35 && !st.menu_open {
+        return;
+    }
+
+    let mut focusables: Vec<Focusable> = Vec::with_capacity(36);
 
     // ---------------------------------------------------------
-    // 1. Top Command Strip (Brand + Search + Quick Fullbright + Edit HUD + Close)
+    // 1. Top Bar (Draggable handle + Search + Compact Actions)
     // ---------------------------------------------------------
-    let top_h = 56.0;
+    let top_h = 46.0;
     let top_bar = Rect::new(px, py, panel_w, top_h);
     dl.rect(
         Rect::new(px + 1.0, py + top_h, panel_w - 2.0, 1.0),
         0.0,
-        palette::BORDER.with_alpha(anim),
+        palette::BORDER.with_alpha(0.65 * anim),
     );
 
-    // Brand Crest & Wordmark
-    dl.kestrel_crest(px + 18.0, py + 17.0, 22.0, palette::ACCENT, palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiTitle,
-        px + 48.0,
-        py + 15.0,
-        "KESTREL",
+    // Subtle 2x3 grip dots + Kestrel mark + Wordmark
+    for row in 0..3 {
+        for col in 0..2 {
+            dl.rect(
+                Rect::new(px + 12.0 + col as f32 * 4.0, py + 17.0 + row as f32 * 5.0, 2.0, 2.0),
+                1.0,
+                palette::TEXT_SECONDARY.with_alpha(0.35 * anim),
+            );
+        }
+    }
+    dl.kestrel_crest(
+        px + 26.0,
+        py + 14.0,
+        18.0,
+        palette::ACCENT.with_alpha(anim),
         palette::TEXT_PRIMARY.with_alpha(anim),
     );
     dl.text(
         atlas,
-        FontKind::MonoSmall,
-        px + 152.0,
-        py + 21.0,
-        "SURVIVAL",
-        palette::ACCENT.with_alpha(anim),
+        FontKind::UiHeading,
+        px + 52.0,
+        py + 13.0,
+        "KESTREL",
+        palette::TEXT_PRIMARY.with_alpha(anim),
     );
 
-    // Search Input (Live filter)
-    let search_x = px + 236.0;
-    let search_w = (panel_w - 644.0).max(120.0);
-    let search_rect = Rect::new(search_x, py + 12.0, search_w, 32.0);
+    // Right actions: Search | HUD | Panic | Close (x)
+    let close_rect = Rect::new(px + panel_w - 40.0, py + 9.0, 28.0, 28.0);
+    let panic_rect = Rect::new(close_rect.x - 66.0, py + 9.0, 58.0, 28.0);
+    let hud_rect = Rect::new(panic_rect.x - 62.0, py + 9.0, 54.0, 28.0);
+    let search_x = (px + 154.0).max(px + 140.0);
+    let search_w = (hud_rect.x - search_x - 12.0).clamp(120.0, 230.0);
+    let search_rect = Rect::new(hud_rect.x - search_w - 12.0, py + 9.0, search_w, 28.0);
+
     draw_text_input(
         st,
         dl,
         atlas,
         search_rect,
         &st.search_query.clone(),
-        "Search modules or waypoints...",
+        "Search...",
         st.active_text_target == Some(TextTarget::Search),
         st.focused == Some(FocusId::SearchBox),
         FocusId::SearchBox,
         TextTarget::Search,
         &mut focusables,
     );
-
-    // Right action strip
-    let close_rect = Rect::new(px + panel_w - 72.0, py + 12.0, 56.0, 32.0);
-    let panic_rect = Rect::new(close_rect.x - 82.0, py + 12.0, 74.0, 32.0);
-    let edit_hud_rect = Rect::new(panic_rect.x - 104.0, py + 12.0, 96.0, 32.0);
-    let quick_fb_rect = Rect::new(edit_hud_rect.x - 130.0, py + 12.0, 122.0, 32.0);
-
-    draw_quick_fb_pill(st, dl, atlas, quick_fb_rect, &mut focusables);
-    draw_action_button(
+    draw_top_pill(
+        st,
+        dl,
+        atlas,
+        hud_rect,
+        "HUD",
+        false,
+        FocusId::EditHudBtn,
+        &mut focusables,
+    );
+    draw_top_pill(
         st,
         dl,
         atlas,
         panic_rect,
         "Panic",
-        false,
+        true,
         FocusId::PanicBtn,
         &mut focusables,
     );
-    draw_action_button(
-        st,
-        dl,
-        atlas,
-        edit_hud_rect,
-        "Edit HUD",
-        true,
-        FocusId::EditHudBtn,
-        &mut focusables,
-    );
-    draw_action_button(
-        st,
-        dl,
-        atlas,
-        close_rect,
-        "~ Esc",
-        false,
-        FocusId::CloseBtn,
-        &mut focusables,
-    );
+    draw_close_button(st, dl, atlas, close_rect, &mut focusables);
 
     // ---------------------------------------------------------
-    // 2. Left Navigation Rail (176px) + Main Workspace
+    // 2. Left Rail (148px, crisp 1-line items, active left bar)
     // ---------------------------------------------------------
-    let rail_w = 176.0;
-    let body_y = top_bar.y + top_h + 1.0;
+    let rail_w = 148.0;
+    let body_y = py + top_h + 1.0;
     let body_h = panel_h - top_h - 1.0;
-    let rail_rect = Rect::new(px, body_y, rail_w, body_h);
     dl.rect(
         Rect::new(px + rail_w, body_y, 1.0, body_h),
         0.0,
-        palette::BORDER.with_alpha(anim),
+        palette::BORDER.with_alpha(0.55 * anim),
     );
 
     let tabs = [
-        (NavTab::Survival, FocusId::TabSurvival, "Visuals", "Fullbright, ESP, Freecam"),
-        (NavTab::Automation, FocusId::TabAutomation, "Combat & Auto", "AimAssist, AutoEat, Tools"),
-        (NavTab::Hud, FocusId::TabHud, "HUD Overlay", "Coords, Radar, CPS"),
-        (NavTab::Waypoints, FocusId::TabWaypoints, "Waypoints", "Markers & Portal Math"),
-        (NavTab::System, FocusId::TabSystem, "Settings", "Status, Keys, Config"),
+        (NavTab::Survival, FocusId::TabSurvival, "Visuals"),
+        (NavTab::Automation, FocusId::TabAutomation, "Combat & Auto"),
+        (NavTab::Hud, FocusId::TabHud, "HUD"),
+        (NavTab::Waypoints, FocusId::TabWaypoints, "Waypoints"),
+        (NavTab::System, FocusId::TabSystem, "Settings"),
     ];
 
-    for (i, (tab, fid, title, sub)) in tabs.iter().enumerate() {
-        let tr = Rect::new(rail_rect.x + 12.0, rail_rect.y + 12.0 + i as f32 * 50.0, rail_w - 24.0, 46.0);
-        let selected = st.active_tab == *tab;
+    for (i, (tab, fid, title)) in tabs.iter().enumerate() {
+        let tr = Rect::new(px + 10.0, body_y + 12.0 + i as f32 * 38.0, rail_w - 20.0, 34.0);
+        let selected = st.active_tab == *tab && st.search_query.trim().is_empty();
         let hovered = tr.contains(st.cursor_pos[0], st.cursor_pos[1]);
         let focused = st.focused == Some(*fid);
 
-        let bg = if selected {
-            palette::SURFACE_HOVER
-        } else if hovered {
-            palette::SURFACE
-        } else {
-            Color::hex(0x000000, 0.0)
-        };
-        let border = if focused {
-            palette::ACCENT
-        } else if selected {
-            palette::BORDER_STRONG
-        } else {
-            Color::hex(0x000000, 0.0)
-        };
-        dl.rect_border(tr, 8.0, bg, if focused { 2.0 } else { 1.0 }, border);
         if selected {
+            dl.rect(tr, 6.0, palette::SURFACE_HOVER.with_alpha(0.9 * anim));
             dl.rect(
-                Rect::new(tr.x + 3.0, tr.y + 10.0, 3.0, tr.h - 20.0),
-                1.5,
-                palette::ACCENT,
+                Rect::new(tr.x + 2.0, tr.y + 8.0, 2.5, tr.h - 16.0),
+                1.25,
+                palette::ACCENT.with_alpha(anim),
             );
+        } else if hovered {
+            dl.rect(tr, 6.0, palette::SURFACE.with_alpha(0.7 * anim));
+        }
+        if focused {
+            dl.rect_border(tr, 6.0, Color::hex(0x000000, 0.0), 1.0, palette::ACCENT);
         }
         dl.text(
             atlas,
-            FontKind::UiSemi,
-            tr.x + 14.0,
-            tr.y + 7.0,
+            if selected { FontKind::UiSemi } else { FontKind::UiBody },
+            tr.x + 12.0,
+            tr.y + 8.0,
             title,
             if selected {
-                palette::TEXT_PRIMARY
+                palette::TEXT_PRIMARY.with_alpha(anim)
             } else {
-                palette::TEXT_SECONDARY
+                palette::TEXT_SECONDARY.with_alpha(anim)
             },
-        );
-        dl.text(
-            atlas,
-            FontKind::UiSmall,
-            tr.x + 14.0,
-            tr.y + 25.0,
-            sub,
-            palette::TEXT_SECONDARY.with_alpha(0.85),
         );
         focusables.push(Focusable {
             id: *fid,
@@ -217,102 +215,85 @@ pub fn render_menu(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
         });
     }
 
-    // Socket & Lightmap honest status summary at bottom of rail
-    let status_rect = Rect::new(rail_rect.x + 12.0, rail_rect.y + body_h - 68.0, rail_w - 24.0, 56.0);
-    dl.rect_border(status_rect, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    let sock_label = if st.game.socket_connected {
-        "Socket: Connected"
-    } else {
-        "Socket: Offline"
-    };
-    let sock_col = if st.game.socket_connected {
+    // Quiet single-line connection indicator at bottom of rail
+    let dot_col = if st.game.socket_connected {
         palette::SUCCESS
     } else {
         palette::TEXT_SECONDARY
     };
-    let lm_label = if st.lightmap_hooked {
-        "Lightmap: Hooked"
+    let status_txt = if st.game.socket_connected {
+        "Connected"
     } else {
-        "Lightmap: Waiting"
+        "Standby"
     };
+    let sy = body_y + body_h - 26.0;
+    dl.rect(Rect::new(px + 18.0, sy + 5.0, 6.0, 6.0), 3.0, dot_col.with_alpha(anim));
     dl.text(
         atlas,
         FontKind::UiSmall,
-        status_rect.x + 10.0,
-        status_rect.y + 9.0,
-        sock_label,
-        sock_col,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        status_rect.x + 10.0,
-        status_rect.y + 29.0,
-        lm_label,
-        if st.lightmap_hooked {
-            palette::ACCENT
-        } else {
-            palette::TEXT_SECONDARY
-        },
+        px + 30.0,
+        sy,
+        status_txt,
+        palette::TEXT_SECONDARY.with_alpha(0.85 * anim),
     );
 
     // ---------------------------------------------------------
-    // 3. Scrollable Content Area
+    // 3. Scrollable Flat Content Area
     // ---------------------------------------------------------
     let content = Rect::new(px + rail_w + 1.0, body_y, panel_w - rail_w - 1.0, body_h);
     dl.push_scissor(content);
 
-    // Scroll input
     if content.contains(st.cursor_pos[0], st.cursor_pos[1]) && st.scroll_delta.abs() > 0.01 {
-        st.scroll_y = (st.scroll_y - st.scroll_delta * 28.0).clamp(0.0, st.max_scroll_y);
+        st.scroll_y = (st.scroll_y - st.scroll_delta * 30.0).clamp(0.0, st.max_scroll_y);
     }
 
     let cx = content.x + 22.0;
     let cw = content.w - 44.0;
-    let mut cy = content.y + 18.0 - st.scroll_y;
+    let mut cy = content.y + 16.0 - st.scroll_y;
 
     let query = st.search_query.trim().to_lowercase();
     if !query.is_empty() {
         cy = render_search_results(st, dl, atlas, cx, cy, cw, &query, &mut focusables);
     } else {
         cy = match st.active_tab {
-            NavTab::Survival => render_survival_tab(st, dl, atlas, cx, cy, cw, &mut focusables),
+            NavTab::Survival => render_visuals_tab(st, dl, atlas, cx, cy, cw, &mut focusables),
             NavTab::Automation => render_automation_tab(st, dl, atlas, cx, cy, cw, &mut focusables),
             NavTab::Hud => render_hud_tab(st, dl, atlas, cx, cy, cw, &mut focusables),
             NavTab::Waypoints => render_waypoints_tab(st, dl, atlas, cx, cy, cw, &mut focusables),
-            NavTab::System => render_system_tab(st, dl, atlas, cx, cy, cw, &mut focusables),
+            NavTab::System => render_settings_tab(st, dl, atlas, cx, cy, cw, &mut focusables),
         };
     }
 
-    let total_content_h = (cy + st.scroll_y) - (content.y + 18.0);
-    st.max_scroll_y = (total_content_h - (content.h - 32.0)).max(0.0);
+    let total_content_h = (cy + st.scroll_y) - (content.y + 16.0);
+    st.max_scroll_y = (total_content_h - (content.h - 28.0)).max(0.0);
     st.scroll_y = st.scroll_y.clamp(0.0, st.max_scroll_y);
 
     dl.pop_scissor();
 
-    // Scrollbar indicator when needed
+    // Minimal scrollbar
     if st.max_scroll_y > 1.0 {
-        let track_h = content.h - 24.0;
-        let thumb_h = (track_h * (content.h / (content.h + st.max_scroll_y))).max(32.0);
-        let thumb_y = content.y + 12.0 + (st.scroll_y / st.max_scroll_y) * (track_h - thumb_h);
+        let track_h = content.h - 20.0;
+        let thumb_h = (track_h * (content.h / (content.h + st.max_scroll_y))).max(28.0);
+        let thumb_y = content.y + 10.0 + (st.scroll_y / st.max_scroll_y) * (track_h - thumb_h);
         dl.rect(
-            Rect::new(content.x + content.w - 7.0, thumb_y, 3.5, thumb_h),
-            1.75,
-            palette::BORDER_STRONG,
+            Rect::new(content.x + content.w - 6.0, thumb_y, 3.0, thumb_h),
+            1.5,
+            palette::BORDER_STRONG.with_alpha(0.65 * anim),
         );
     }
 
-    // Toast notification at bottom of panel
+    // Toast notification anchored just below floating window
     if let Some((msg, at)) = st.toast.clone() {
         if at.elapsed() < Duration::from_secs(3) {
-            let tw = atlas.measure(FontKind::UiSemi, &msg) + 28.0;
-            let tr = Rect::new(px + (panel_w - tw) * 0.5, py + panel_h + 10.0, tw, 30.0);
-            dl.rect_border(tr, 8.0, palette::SURFACE, 1.5, palette::ACCENT);
+            let tw = atlas.measure(FontKind::UiSmall, &msg) + 24.0;
+            let tr = Rect::new(px + (panel_w - tw) * 0.5, py + panel_h + 10.0, tw, 28.0);
+            dl.shadow(tr, 8.0, 10.0, palette::SHADOW);
+            dl.rect_border(tr, 8.0, palette::CANVAS, 1.0, palette::ACCENT);
             dl.text(
                 atlas,
-                FontKind::UiSemi,
-                tr.x + 14.0,
-                tr.y + 7.0,
+                FontKind::UiSmall,
+                tr.x + 12.0,
+                tr.y + 6.0,
                 &msg,
                 palette::TEXT_PRIMARY,
             );
@@ -321,13 +302,49 @@ pub fn render_menu(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
         }
     }
 
-    // Process clicks, sliders, and keyboard navigation after drawing layout
+    // Handle drag & control interactions when open
     if st.menu_open {
+        handle_menu_drag(st, top_bar, &focusables, sw, sh, base_w, base_h);
         process_interactions(st, &focusables);
     }
 }
 
-fn render_survival_tab(
+fn handle_menu_drag(
+    st: &mut AppState,
+    top_bar: Rect,
+    focusables: &[Focusable],
+    sw: f32,
+    sh: f32,
+    panel_w: f32,
+    panel_h: f32,
+) {
+    let [mx, my] = st.cursor_pos;
+    if st.mouse_just_pressed && top_bar.contains(mx, my) {
+        let over_control = focusables
+            .iter()
+            .any(|f| top_bar.contains(f.rect.x, f.rect.y) && f.rect.contains(mx, my));
+        if !over_control {
+            let cur = st.menu_pos.unwrap_or([top_bar.x, top_bar.y]);
+            st.dragging_menu = Some([mx - cur[0], my - cur[1]]);
+        }
+    }
+    if st.mouse_down
+        && let Some([ox, oy]) = st.dragging_menu
+    {
+        let nx = (mx - ox).clamp(12.0, (sw - panel_w - 12.0).max(12.0));
+        let ny = (my - oy).clamp(12.0, (sh - panel_h - 12.0).max(12.0));
+        st.menu_pos = Some([nx.round(), ny.round()]);
+    }
+    if !st.mouse_down {
+        st.dragging_menu = None;
+    }
+}
+
+// ---------------------------------------------------------
+// Tabs (Clean flat rows + inset option strips)
+// ---------------------------------------------------------
+
+fn render_visuals_tab(
     st: &AppState,
     dl: &mut DrawList,
     atlas: &FontAtlas,
@@ -336,461 +353,75 @@ fn render_survival_tab(
     w: f32,
     focusables: &mut Vec<Focusable>,
 ) -> f32 {
-    // Hero Featured Module: Fullbright (asymmetric larger treatment per R-14)
-    let hero_h = 166.0;
-    let hero = Rect::new(x, y, w, hero_h);
-    dl.rect_border(hero, 10.0, palette::SURFACE, 1.0, palette::BORDER);
+    y = draw_section_label(dl, atlas, x, y, w, "LIGHTING & CAMERA");
 
-    dl.icon_sun(hero.x + 28.0, hero.y + 30.0, 11.0, palette::ACCENT);
-    dl.text(
-        atlas,
-        FontKind::UiHeading,
-        hero.x + 48.0,
-        hero.y + 18.0,
-        "Fullbright",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        hero.x + 48.0,
-        hero.y + 42.0,
-        "Lights up dark caves and night vision areas without needing torches.",
-        palette::TEXT_SECONDARY,
-    );
-
-    let fb_toggle = Rect::new(hero.x + hero.w - 86.0, hero.y + 18.0, 68.0, 30.0);
-    draw_toggle_pill(
+    // Fullbright
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        fb_toggle,
+        x,
+        y,
+        w,
+        "Fullbright",
+        "Brightens caves and night areas without torches",
         st.config.fullbright_enabled,
         FocusId::FullbrightToggle,
         focusables,
     );
-
-    // Mode segmented control (Max 100% vs Soft Blend)
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        hero.x + 18.0,
-        hero.y + 76.0,
-        "Mode",
-        palette::TEXT_SECONDARY,
-    );
-    let max_btn = Rect::new(hero.x + 18.0, hero.y + 96.0, 126.0, 30.0);
-    let soft_btn = Rect::new(hero.x + 152.0, hero.y + 96.0, 126.0, 30.0);
-    draw_segment_button(
-        st,
-        dl,
-        atlas,
-        max_btn,
-        "Max 100%",
-        st.config.fullbright_mode == FullbrightMode::Max,
-        FocusId::FullbrightModeMax,
-        focusables,
-    );
-    draw_segment_button(
-        st,
-        dl,
-        atlas,
-        soft_btn,
-        "Soft Blend",
-        st.config.fullbright_mode == FullbrightMode::Soft,
-        FocusId::FullbrightModeSoft,
-        focusables,
-    );
-
-    // Strength slider (active for Soft Blend, informative otherwise)
-    let slider_x = hero.x + 304.0;
-    let slider_w = (hero.w - 324.0).max(160.0);
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(slider_x, hero.y + 76.0, slider_w, 50.0),
-        "Soft Boost Strength",
-        &format!("{:.0}%", st.config.fullbright_strength * 100.0),
-        st.config.fullbright_strength,
-        0.35,
-        1.0,
-        0.05,
-        FocusId::FullbrightStrength,
-        focusables,
-    );
-
-    let hook_note = if st.lightmap_hooked {
-        "Active · brightens dark caves and night areas immediately."
-    } else {
-        "Ready · join a world to activate full brightness."
-    };
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        hero.x + 18.0,
-        hero.y + 138.0,
-        hook_note,
-        palette::TEXT_SECONDARY,
-    );
-
-    y += hero_h + 16.0;
-
-    // Two-column varied secondary survival controls: Zoom (left) + Crosshair+ (right)
-    let col_gap = 14.0;
-    let col_w = (w - col_gap) * 0.5;
-    let card_h = 164.0;
-
-    // Left: OptiZoom
-    let z_rect = Rect::new(x, y, col_w, card_h);
-    dl.rect_border(z_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiHeading,
-        z_rect.x + 16.0,
-        z_rect.y + 14.0,
-        "OptiZoom",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        z_rect.x + 16.0,
-        z_rect.y + 38.0,
-        "Hold key to smoothly zoom in on distant targets.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(z_rect.x + col_w - 82.0, z_rect.y + 14.0, 66.0, 28.0),
-        st.config.zoom_enabled,
-        FocusId::ZoomToggle,
-        focusables,
-    );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(z_rect.x + 16.0, z_rect.y + 66.0, col_w - 32.0, 46.0),
-        "Zoom FOV",
-        &format!("{} deg", st.config.zoom_fov),
-        st.config.zoom_fov as f32,
-        15.0,
-        60.0,
-        5.0,
-        FocusId::ZoomFovSlider,
-        focusables,
-    );
-    draw_cycle_row(
-        st,
-        dl,
-        atlas,
-        Rect::new(z_rect.x + 16.0, z_rect.y + 120.0, col_w - 32.0, 30.0),
-        "Hold Key",
-        st.config.zoom_key.label(),
-        FocusId::ZoomKeyCycle,
-        focusables,
-    );
-
-    // Right: Crosshair+
-    let c_rect = Rect::new(x + col_w + col_gap, y, col_w, card_h);
-    dl.rect_border(c_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiHeading,
-        c_rect.x + 16.0,
-        c_rect.y + 14.0,
-        "Crosshair+",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        c_rect.x + 16.0,
-        c_rect.y + 38.0,
-        "Sharp custom reticle overlaid in Vulkan.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(c_rect.x + col_w - 82.0, c_rect.y + 14.0, 66.0, 28.0),
-        st.config.crosshair_enabled,
-        FocusId::CrosshairToggle,
-        focusables,
-    );
-    draw_cycle_row(
-        st,
-        dl,
-        atlas,
-        Rect::new(c_rect.x + 16.0, c_rect.y + 66.0, col_w - 32.0, 30.0),
-        "Reticle Style",
-        st.config.crosshair_style.label(),
-        FocusId::CrosshairStyleCycle,
-        focusables,
-    );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(c_rect.x + 16.0, c_rect.y + 106.0, (col_w - 40.0) * 0.5, 46.0),
-        "Arm Size",
-        &format!("{:.0}px", st.config.crosshair_size),
-        st.config.crosshair_size,
-        3.0,
-        14.0,
-        1.0,
-        FocusId::CrosshairSizeSlider,
-        focusables,
-    );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(
-            c_rect.x + 24.0 + (col_w - 40.0) * 0.5,
-            c_rect.y + 106.0,
-            (col_w - 40.0) * 0.5,
-            46.0,
-        ),
-        "Center Gap",
-        &format!("{:.0}px", st.config.crosshair_gap),
-        st.config.crosshair_gap,
-        1.0,
-        10.0,
-        1.0,
-        FocusId::CrosshairGapSlider,
-        focusables,
-    );
-
-    y += card_h + 16.0;
-
-    // X-Ray Vision Card (Ore 3D ESP + Cave Wireframe + Chest/Mobs ESP)
-    let x_rect = Rect::new(x, y, w, 178.0);
-    dl.rect_border(x_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiHeading,
-        x_rect.x + 16.0,
-        x_rect.y + 14.0,
-        "X-Ray Vision",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        x_rect.x + 16.0,
-        x_rect.y + 38.0,
-        "3D Ore ESP highlights buried ores; Cave Wireframe & ESP reveal tunnels and chests.",
-        palette::TEXT_SECONDARY,
-    );
-
-    let x_third = (w - 56.0) / 3.0;
-    let xo_row = Rect::new(x_rect.x + 16.0, x_rect.y + 62.0, x_third, 30.0);
-    dl.text(atlas, FontKind::UiSemi, xo_row.x, xo_row.y + 6.0, "Ore X-Ray", palette::TEXT_PRIMARY);
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(xo_row.x + xo_row.w - 60.0, xo_row.y, 60.0, 28.0),
-        st.config.xray_ores,
-        FocusId::XrayOresToggle,
-        focusables,
-    );
-
-    let xt_row = Rect::new(x_rect.x + 28.0 + x_third, x_rect.y + 62.0, x_third, 30.0);
-    dl.text(atlas, FontKind::UiSemi, xt_row.x, xt_row.y + 6.0, "Caves", palette::TEXT_PRIMARY);
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(xt_row.x + xt_row.w - 60.0, xt_row.y, 60.0, 28.0),
-        st.config.xray_terrain,
-        FocusId::XrayTerrainToggle,
-        focusables,
-    );
-
-    let xe_row = Rect::new(x_rect.x + 40.0 + x_third * 2.0, x_rect.y + 62.0, x_third, 30.0);
-    dl.text(atlas, FontKind::UiSemi, xe_row.x, xe_row.y + 6.0, "Chest/Mob", palette::TEXT_PRIMARY);
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(xe_row.x + xe_row.w - 60.0, xe_row.y, 60.0, 28.0),
-        st.config.xray_entities,
-        FocusId::XrayEntitiesToggle,
-        focusables,
-    );
-
-    let x_half = (w - 46.0) * 0.5;
-    draw_cycle_row(
-        st,
-        dl,
-        atlas,
-        Rect::new(x_rect.x + 16.0, x_rect.y + 100.0, x_half, 28.0),
-        "Ore Filter",
-        st.config.xray_ore_preset.label(),
-        FocusId::XrayOrePresetCycle,
-        focusables,
-    );
-    draw_cycle_row(
-        st,
-        dl,
-        atlas,
-        Rect::new(x_rect.x + 30.0 + x_half, x_rect.y + 100.0, x_half, 28.0),
-        "Hotkey (Ore)",
-        st.config.xray_key.label(),
-        FocusId::XrayKeyCycle,
-        focusables,
-    );
-
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(x_rect.x + 16.0, x_rect.y + 132.0, w - 32.0, 42.0),
-        "Ore Scan Radius",
-        &format!("{} blocks", st.config.xray_radius),
-        st.config.xray_radius as f32,
-        12.0,
-        48.0,
-        4.0,
-        FocusId::XrayRadiusSlider,
-        focusables,
-    );
-
-    y += 192.0;
-    // Entity ESP & Tracers Card
-    let esp_rect = Rect::new(x, y, w, 146.0);
-    dl.rect_border(esp_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiHeading,
-        esp_rect.x + 16.0,
-        esp_rect.y + 14.0,
-        "Entity ESP & Tracers",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        esp_rect.x + 16.0,
-        esp_rect.y + 38.0,
-        "Draw boxes and guide lines to nearby players, hostile mobs, animals, and loot.",
-        palette::TEXT_SECONDARY,
-    );
-
-    let half_w = (w - 46.0) * 0.5;
-    let e_row = Rect::new(esp_rect.x + 16.0, esp_rect.y + 64.0, half_w, 28.0);
-    dl.text(atlas, FontKind::UiSemi, e_row.x, e_row.y + 5.0, "3D Box ESP", palette::TEXT_PRIMARY);
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(e_row.x + e_row.w - 64.0, e_row.y, 64.0, 28.0),
-        st.config.esp_enabled,
-        FocusId::EspToggle,
-        focusables,
-    );
-
-    let t_row = Rect::new(esp_rect.x + 30.0 + half_w, esp_rect.y + 64.0, half_w, 28.0);
-    dl.text(atlas, FontKind::UiSemi, t_row.x, t_row.y + 5.0, "Tracers", palette::TEXT_PRIMARY);
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(t_row.x + t_row.w - 64.0, t_row.y, 64.0, 28.0),
-        st.config.tracers_enabled,
-        FocusId::TracersToggle,
-        focusables,
-    );
-
-    let q_w = (w - 72.0) / 5.0;
-    let filters = [
-        ("Players", st.config.esp_players, FocusId::EspPlayersToggle),
-        ("Hostile", st.config.esp_hostile, FocusId::EspHostileToggle),
-        ("Passive", st.config.esp_passive, FocusId::EspPassiveToggle),
-        ("Items", st.config.esp_items, FocusId::EspItemsToggle),
-        ("Chests", st.config.esp_chests, FocusId::EspChestsToggle),
-    ];
-    for (idx, (lbl, on, fid)) in filters.into_iter().enumerate() {
-        let fx = esp_rect.x + 16.0 + idx as f32 * (q_w + 10.0);
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 58.0);
+    {
+        let half = (iw - 20.0) * 0.44;
         draw_segment_button(
             st,
             dl,
             atlas,
-            Rect::new(fx, esp_rect.y + 104.0, q_w, 28.0),
-            lbl,
-            on,
-            fid,
+            Rect::new(ix, iy + 14.0, (half - 6.0) * 0.5, 28.0),
+            "Max",
+            st.config.fullbright_mode == FullbrightMode::Max,
+            FocusId::FullbrightModeMax,
+            focusables,
+        );
+        draw_segment_button(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + (half - 6.0) * 0.5 + 6.0, iy + 14.0, (half - 6.0) * 0.5, 28.0),
+            "Soft",
+            st.config.fullbright_mode == FullbrightMode::Soft,
+            FocusId::FullbrightModeSoft,
+            focusables,
+        );
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + half + 18.0, iy + 6.0, iw - half - 18.0, 42.0),
+            "Soft Strength",
+            &format!("{:.0}%", st.config.fullbright_strength * 100.0),
+            st.config.fullbright_strength,
+            0.35,
+            1.0,
+            0.05,
+            FocusId::FullbrightStrength,
             focusables,
         );
     }
-    y += 160.0;
+    y = next_y;
 
-    // Freecam Card
-    let fc_rect = Rect::new(x, y, w, 108.0);
-    dl.rect_border(fc_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiHeading,
-        fc_rect.x + 16.0,
-        fc_rect.y + 14.0,
-        "Freecam",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        fc_rect.x + 16.0,
-        fc_rect.y + 38.0,
-        "Fly the camera freely to scout caves and bases while your character stays still.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(fc_rect.x + w - 82.0, fc_rect.y + 14.0, 66.0, 28.0),
-        st.config.freecam_enabled,
-        FocusId::FreecamToggle,
-        focusables,
-    );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(fc_rect.x + 16.0, fc_rect.y + 58.0, w - 32.0, 42.0),
-        "Flight Speed",
-        &format!("{:.0} blk/s", st.config.freecam_speed),
-        st.config.freecam_speed,
-        4.0,
-        36.0,
-        2.0,
-        FocusId::FreecamSpeedSlider,
-        focusables,
-    );
-    y += 122.0;
-
-
-    // Compact bottom strip: Horizon Vanilla Gamma Sync
-    let g_rect = Rect::new(x, y, w, 72.0);
-    dl.rect_border(g_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
+    // Horizon Brightness
     let gamma_val = st.game.horizon_gamma.unwrap_or(0.5);
     let gamma_lbl = if st.game.socket_connected {
         format!("{:.0}%", gamma_val * 100.0)
     } else {
-        String::from("Socket offline")
+        String::from("Offline")
     };
     draw_slider(
         st,
         dl,
         atlas,
-        Rect::new(g_rect.x + 18.0, g_rect.y + 12.0, g_rect.w - 36.0, 48.0),
-        "Horizon Brightness (options.txt gamma)",
+        Rect::new(x + 4.0, y + 6.0, w - 8.0, 40.0),
+        "Game Brightness",
         &gamma_lbl,
         gamma_val,
         0.0,
@@ -799,8 +430,281 @@ fn render_survival_tab(
         FocusId::GammaSlider,
         focusables,
     );
+    y += 50.0;
+    draw_hairline(dl, x, y, w);
 
-    y + 72.0
+    // OptiZoom
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "OptiZoom",
+        "Hold key to smoothly zoom in on distant targets",
+        st.config.zoom_enabled,
+        FocusId::ZoomToggle,
+        focusables,
+    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 50.0);
+    {
+        let sw_w = iw * 0.60;
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 4.0, sw_w, 40.0),
+            "Zoom FOV",
+            &format!("{} deg", st.config.zoom_fov),
+            st.config.zoom_fov as f32,
+            15.0,
+            60.0,
+            5.0,
+            FocusId::ZoomFovSlider,
+            focusables,
+        );
+        draw_cycle_chip(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + sw_w + 14.0, iy + 11.0, iw - sw_w - 14.0, 28.0),
+            "Key",
+            st.config.zoom_key.label(),
+            FocusId::ZoomKeyCycle,
+            focusables,
+        );
+    }
+    y = next_y;
+
+    // Crosshair+
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "Crosshair+",
+        "Sharp custom reticle overlaid cleanly",
+        st.config.crosshair_enabled,
+        FocusId::CrosshairToggle,
+        focusables,
+    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 50.0);
+    {
+        let cyc_w = 136.0;
+        draw_cycle_chip(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 11.0, cyc_w, 28.0),
+            "Style",
+            st.config.crosshair_style.label(),
+            FocusId::CrosshairStyleCycle,
+            focusables,
+        );
+        let rem = (iw - cyc_w - 24.0) * 0.5;
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + cyc_w + 12.0, iy + 4.0, rem, 40.0),
+            "Size",
+            &format!("{:.0}px", st.config.crosshair_size),
+            st.config.crosshair_size,
+            3.0,
+            14.0,
+            1.0,
+            FocusId::CrosshairSizeSlider,
+            focusables,
+        );
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + cyc_w + 24.0 + rem, iy + 4.0, rem, 40.0),
+            "Gap",
+            &format!("{:.0}px", st.config.crosshair_gap),
+            st.config.crosshair_gap,
+            1.0,
+            10.0,
+            1.0,
+            FocusId::CrosshairGapSlider,
+            focusables,
+        );
+    }
+    y = next_y;
+
+    // Freecam
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "Freecam",
+        "Fly camera freely while your character stays safely in place",
+        st.config.freecam_enabled,
+        FocusId::FreecamToggle,
+        focusables,
+    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 46.0);
+    {
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 3.0, iw, 40.0),
+            "Flight Speed",
+            &format!("{:.0} blk/s", st.config.freecam_speed),
+            st.config.freecam_speed,
+            4.0,
+            36.0,
+            2.0,
+            FocusId::FreecamSpeedSlider,
+            focusables,
+        );
+    }
+    y = next_y;
+
+    y += 10.0;
+    y = draw_section_label(dl, atlas, x, y, w, "X-RAY & ESP");
+
+    // Ore X-Ray
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "Ore X-Ray",
+        "3D boxes for buried Diamond, Debris, Gold, and Iron",
+        st.config.xray_ores,
+        FocusId::XrayOresToggle,
+        focusables,
+    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 84.0);
+    {
+        let half = (iw - 12.0) * 0.5;
+        draw_cycle_chip(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 6.0, half, 26.0),
+            "Filter",
+            st.config.xray_ore_preset.label(),
+            FocusId::XrayOrePresetCycle,
+            focusables,
+        );
+        draw_cycle_chip(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + half + 12.0, iy + 6.0, half, 26.0),
+            "Key",
+            st.config.xray_key.label(),
+            FocusId::XrayKeyCycle,
+            focusables,
+        );
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 38.0, iw, 40.0),
+            "Scan Radius",
+            &format!("{} blocks", st.config.xray_radius),
+            st.config.xray_radius as f32,
+            12.0,
+            48.0,
+            4.0,
+            FocusId::XrayRadiusSlider,
+            focusables,
+        );
+    }
+    y = next_y;
+
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "Cave Wireframe",
+        "See underground caves and lava pockets through stone",
+        st.config.xray_terrain,
+        FocusId::XrayTerrainToggle,
+        focusables,
+    );
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "Chest & Mob Through-Walls",
+        "Render chests, players, and mobs through walls",
+        st.config.xray_entities,
+        FocusId::XrayEntitiesToggle,
+        focusables,
+    );
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "Entity ESP Boxes",
+        "3D boxes with name, HP, and distance tags",
+        st.config.esp_enabled,
+        FocusId::EspToggle,
+        focusables,
+    );
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "Tracers",
+        "Guide lines from screen center to nearby entities",
+        st.config.tracers_enabled,
+        FocusId::TracersToggle,
+        focusables,
+    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 42.0);
+    {
+        let q_w = (iw - 32.0) / 5.0;
+        let filters = [
+            ("Players", st.config.esp_players, FocusId::EspPlayersToggle),
+            ("Hostile", st.config.esp_hostile, FocusId::EspHostileToggle),
+            ("Passive", st.config.esp_passive, FocusId::EspPassiveToggle),
+            ("Items", st.config.esp_items, FocusId::EspItemsToggle),
+            ("Chests", st.config.esp_chests, FocusId::EspChestsToggle),
+        ];
+        for (idx, (lbl, on, fid)) in filters.into_iter().enumerate() {
+            let fx = ix + idx as f32 * (q_w + 8.0);
+            draw_segment_button(
+                st,
+                dl,
+                atlas,
+                Rect::new(fx, iy + 8.0, q_w, 26.0),
+                lbl,
+                on,
+                fid,
+                focusables,
+            );
+        }
+    }
+    y = next_y;
+
+    y
 }
 
 fn render_automation_tab(
@@ -813,382 +717,332 @@ fn render_automation_tab(
     focusables: &mut Vec<Focusable>,
 ) -> f32 {
     if !st.game.socket_connected {
-        let banner = Rect::new(x, y, w, 58.0);
-        dl.rect_border(banner, 8.0, palette::SURFACE, 1.0, palette::DANGER);
-        dl.text(
-            atlas,
-            FontKind::UiSemi,
-            banner.x + 14.0,
-            banner.y + 10.0,
-            "Game Link Inactive",
-            palette::DANGER,
-        );
+        dl.rect(Rect::new(x, y, 3.0, 34.0), 1.5, palette::DANGER);
         dl.text(
             atlas,
             FontKind::UiSmall,
-            banner.x + 14.0,
-            banner.y + 31.0,
-            "Turn on agentControl in Horizon Extras so player & combat helpers can run.",
+            x + 12.0,
+            y + 9.0,
+            "Game link standby · join a world to run combat and mining helpers.",
             palette::TEXT_SECONDARY,
         );
-        y += 70.0;
+        y += 42.0;
     }
 
-    // AimAssist Hero Card
-    let aim_r = Rect::new(x, y, w, 178.0);
-    dl.rect_border(aim_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(atlas, FontKind::UiHeading, aim_r.x + 16.0, aim_r.y + 12.0, "AimAssist", palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        aim_r.x + 16.0,
-        aim_r.y + 35.0,
-        "Smoothly keeps your crosshair lined up with nearby zombies, mobs, or players.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
+    y = draw_section_label(dl, atlas, x, y, w, "COMBAT");
+
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        Rect::new(aim_r.x + w - 82.0, aim_r.y + 14.0, 66.0, 28.0),
+        x,
+        y,
+        w,
+        "AimAssist",
+        "Smoothly guides crosshair toward nearby targets",
         st.config.aim_assist,
         FocusId::AimAssistToggle,
         focusables,
     );
-    draw_cycle_row(
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 82.0);
+    {
+        draw_cycle_chip(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 6.0, iw, 26.0),
+            "Targets",
+            st.config.aim_target.label(),
+            FocusId::AimTargetCycle,
+            focusables,
+        );
+        let third = (iw - 24.0) / 3.0;
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 38.0, third, 40.0),
+            "FOV",
+            &format!("{:.0} deg", st.config.aim_fov),
+            st.config.aim_fov,
+            20.0,
+            150.0,
+            5.0,
+            FocusId::AimFovSlider,
+            focusables,
+        );
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + third + 12.0, iy + 38.0, third, 40.0),
+            "Range",
+            &format!("{:.1}m", st.config.aim_range),
+            st.config.aim_range,
+            2.5,
+            6.0,
+            0.5,
+            FocusId::AimRangeSlider,
+            focusables,
+        );
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + (third + 12.0) * 2.0, iy + 38.0, third, 40.0),
+            "Smooth",
+            &format!("{:.0}%", st.config.aim_smooth * 100.0),
+            st.config.aim_smooth,
+            0.15,
+            0.90,
+            0.05,
+            FocusId::AimSmoothSlider,
+            focusables,
+        );
+    }
+    y = next_y;
+
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        Rect::new(aim_r.x + 16.0, aim_r.y + 62.0, w - 32.0, 28.0),
-        "Targets",
-        st.config.aim_target.label(),
-        FocusId::AimTargetCycle,
-        focusables,
-    );
-    let aim_third = (w - 56.0) / 3.0;
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(aim_r.x + 16.0, aim_r.y + 104.0, aim_third, 50.0),
-        "FOV",
-        &format!("{:.0} deg", st.config.aim_fov),
-        st.config.aim_fov,
-        20.0,
-        150.0,
-        5.0,
-        FocusId::AimFovSlider,
-        focusables,
-    );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(aim_r.x + 28.0 + aim_third, aim_r.y + 104.0, aim_third, 50.0),
-        "Range",
-        &format!("{:.1}m", st.config.aim_range),
-        st.config.aim_range,
-        2.5,
-        6.0,
-        0.5,
-        FocusId::AimRangeSlider,
-        focusables,
-    );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(aim_r.x + 40.0 + aim_third * 2.0, aim_r.y + 104.0, aim_third, 50.0),
-        "Smooth",
-        &format!("{:.0}%", st.config.aim_smooth * 100.0),
-        st.config.aim_smooth,
-        0.15,
-        0.90,
-        0.05,
-        FocusId::AimSmoothSlider,
-        focusables,
-    );
-    y += 192.0;
-    let crit_r = Rect::new(x, y, w, 58.0);
-    dl.rect_border(crit_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiSemi,
-        crit_r.x + 16.0,
-        crit_r.y + 10.0,
+        x,
+        y,
+        w,
         "Criticals",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        crit_r.x + 16.0,
-        crit_r.y + 30.0,
-        "Triggers a micro-jump when attacking so hits land while falling for 1.5x critical damage.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(crit_r.x + w - 82.0, crit_r.y + 15.0, 66.0, 28.0),
+        "Micro-jumps on attack so hits land while falling for 1.5x damage",
         st.config.criticals_enabled,
         FocusId::CriticalsToggle,
         focusables,
     );
-    y += 68.0;
 
-    let simple_rows = [
-        (
-            "AutoSprint",
-            "Keeps sprint active whenever you hold forward.",
-            st.config.auto_sprint,
-            FocusId::AutoSprintToggle,
-        ),
-        (
-            "AutoRespawn",
-            "Automatically respawns right away when you die.",
-            st.config.auto_respawn,
-            FocusId::AutoRespawnToggle,
-        ),
-        (
-            "AutoTotem",
-            "Moves a Totem of Undying into your offhand when one is missing.",
-            st.config.auto_totem,
-            FocusId::AutoTotemToggle,
-        ),
-        (
-            "AutoFish",
-            "Reels in and recasts your fishing rod automatically on a bite.",
-            st.config.auto_fish,
-            FocusId::AutoFishToggle,
-        ),
-        (
-            "AntiAFK",
-            "Occasionally taps sneak when idle so servers do not kick you.",
-            st.config.anti_afk,
-            FocusId::AntiAfkToggle,
-        ),
-    ];
-
-    for (title, desc, on, fid) in simple_rows {
-        let rr = Rect::new(x, y, w, 54.0);
-        dl.rect_border(rr, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-        dl.text(atlas, FontKind::UiSemi, rr.x + 16.0, rr.y + 9.0, title, palette::TEXT_PRIMARY);
-        dl.text(atlas, FontKind::UiSmall, rr.x + 16.0, rr.y + 29.0, desc, palette::TEXT_SECONDARY);
-        draw_toggle_pill(
-            st,
-            dl,
-            atlas,
-            Rect::new(rr.x + w - 82.0, rr.y + 13.0, 66.0, 28.0),
-            on,
-            fid,
-            focusables,
-        );
-        y += 62.0;
-    }
-
-    let eat_r = Rect::new(x, y, w, 106.0);
-    dl.rect_border(eat_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(atlas, FontKind::UiSemi, eat_r.x + 16.0, eat_r.y + 10.0, "AutoEat", palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        eat_r.x + 16.0,
-        eat_r.y + 30.0,
-        "Selects food in hotbar and eats automatically below hunger threshold.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        Rect::new(eat_r.x + w - 82.0, eat_r.y + 12.0, 66.0, 28.0),
-        st.config.auto_eat,
-        FocusId::AutoEatToggle,
-        focusables,
-    );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(eat_r.x + 16.0, eat_r.y + 54.0, w - 32.0, 44.0),
-        "Eat At Hunger",
-        &format!("<= {}/20", st.config.auto_eat_hunger),
-        st.config.auto_eat_hunger as f32,
-        6.0,
-        19.0,
-        1.0,
-        FocusId::AutoEatHungerSlider,
-        focusables,
-    );
-    y += 116.0;
-
-    let gap = 14.0;
-    let cw = (w - gap) * 0.5;
-    let tb_r = Rect::new(x, y, cw, 112.0);
-    dl.rect_border(tb_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(atlas, FontKind::UiSemi, tb_r.x + 14.0, tb_r.y + 12.0, "TriggerBot", palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        tb_r.x + 14.0,
-        tb_r.y + 32.0,
-        "Attacks aimed entity in reach.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(tb_r.x + cw - 78.0, tb_r.y + 12.0, 64.0, 28.0),
+        x,
+        y,
+        w,
+        "TriggerBot",
+        "Automatically strikes when crosshair aims at an entity",
         st.config.trigger_bot,
         FocusId::TriggerBotToggle,
         focusables,
     );
-    draw_slider(
-        st,
-        dl,
-        atlas,
-        Rect::new(tb_r.x + 14.0, tb_r.y + 56.0, cw - 28.0, 46.0),
-        "Hit Cooldown",
-        &format!("{} ms", st.config.trigger_bot_delay_ms),
-        st.config.trigger_bot_delay_ms as f32,
-        400.0,
-        1200.0,
-        50.0,
-        FocusId::TriggerBotDelaySlider,
-        focusables,
-    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 46.0);
+    {
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 3.0, iw, 40.0),
+            "Hit Cooldown",
+            &format!("{} ms", st.config.trigger_bot_delay_ms),
+            st.config.trigger_bot_delay_ms as f32,
+            400.0,
+            1200.0,
+            50.0,
+            FocusId::TriggerBotDelaySlider,
+            focusables,
+        );
+    }
+    y = next_y;
 
-    let ac_r = Rect::new(x + cw + gap, y, cw, 112.0);
-    dl.rect_border(ac_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(atlas, FontKind::UiSemi, ac_r.x + 14.0, ac_r.y + 12.0, "AutoClicker", palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        ac_r.x + 14.0,
-        ac_r.y + 32.0,
-        "Pulses LMB while held.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        Rect::new(ac_r.x + cw - 78.0, ac_r.y + 12.0, 64.0, 28.0),
+        x,
+        y,
+        w,
+        "AutoClicker",
+        "Pulses left click continuously while holding attack",
         st.config.auto_clicker,
         FocusId::AutoClickerToggle,
         focusables,
     );
-    draw_slider(
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 46.0);
+    {
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 3.0, iw, 40.0),
+            "Target CPS",
+            &format!("{} CPS", st.config.auto_clicker_cps),
+            st.config.auto_clicker_cps as f32,
+            4.0,
+            20.0,
+            1.0,
+            FocusId::AutoClickerCpsSlider,
+            focusables,
+        );
+    }
+    y = next_y;
+
+    y += 10.0;
+    y = draw_section_label(dl, atlas, x, y, w, "MINING");
+
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        Rect::new(ac_r.x + 14.0, ac_r.y + 56.0, cw - 28.0, 46.0),
-        "Target CPS",
-        &format!("{} CPS", st.config.auto_clicker_cps),
-        st.config.auto_clicker_cps as f32,
-        4.0,
-        20.0,
-        1.0,
-        FocusId::AutoClickerCpsSlider,
-        focusables,
-    );
-
-    y += 122.0;
-
-    let am_r = Rect::new(x, y, cw, 112.0);
-    dl.rect_border(am_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(atlas, FontKind::UiSemi, am_r.x + 14.0, am_r.y + 12.0, "AutoMine", palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        am_r.x + 14.0,
-        am_r.y + 32.0,
-        "Automatically holds mine on aimed blocks.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(am_r.x + cw - 78.0, am_r.y + 12.0, 64.0, 28.0),
+        x,
+        y,
+        w,
+        "AutoMine",
+        "Holds mine automatically on aimed blocks and releases when looking away",
         st.config.auto_mine,
         FocusId::AutoMineToggle,
         focusables,
     );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        am_r.x + 14.0,
-        am_r.y + 68.0,
-        "Releases automatically when looking away.",
-        palette::TEXT_SECONDARY,
-    );
-
-    let sm_r = Rect::new(x + cw + gap, y, cw, 112.0);
-    dl.rect_border(sm_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(atlas, FontKind::UiSemi, sm_r.x + 14.0, sm_r.y + 12.0, "SpeedMine", palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        sm_r.x + 14.0,
-        sm_r.y + 32.0,
-        "Breaks blocks faster with minimal delay.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        Rect::new(sm_r.x + cw - 78.0, sm_r.y + 12.0, 64.0, 28.0),
+        x,
+        y,
+        w,
+        "SpeedMine",
+        "Breaks blocks faster and clears break delay immediately",
         st.config.speed_mine,
         FocusId::SpeedMineToggle,
         focusables,
     );
     let speed_pct = 100 + st.config.speed_mine_power * 20;
-    draw_slider(
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 46.0);
+    {
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 3.0, iw, 40.0),
+            "Mine Speed",
+            &format!("{:.1}x", speed_pct as f32 / 100.0),
+            st.config.speed_mine_power as f32,
+            1.0,
+            5.0,
+            1.0,
+            FocusId::SpeedMinePowerSlider,
+            focusables,
+        );
+    }
+    y = next_y;
+    y = draw_module_row(
         st,
         dl,
         atlas,
-        Rect::new(sm_r.x + 14.0, sm_r.y + 56.0, cw - 28.0, 46.0),
-        "Mine Speed",
-        &format!("{:.1}x", speed_pct as f32 / 100.0),
-        st.config.speed_mine_power as f32,
-        1.0,
-        5.0,
-        1.0,
-        FocusId::SpeedMinePowerSlider,
-        focusables,
-    );
-
-    y += 122.0;
-
-    let at_r = Rect::new(x, y, w, 54.0);
-    dl.rect_border(at_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(atlas, FontKind::UiSemi, at_r.x + 16.0, at_r.y + 9.0, "AutoTool", palette::TEXT_PRIMARY);
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        at_r.x + 16.0,
-        at_r.y + 29.0,
-        "Switches hotbar slot to the best tool when mining a block.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_toggle_pill(
-        st,
-        dl,
-        atlas,
-        Rect::new(at_r.x + w - 82.0, at_r.y + 13.0, 66.0, 28.0),
+        x,
+        y,
+        w,
+        "AutoTool",
+        "Switches hotbar slot to the best tool when mining a block",
         st.config.auto_tool,
         FocusId::AutoToolToggle,
         focusables,
     );
 
-    y + 54.0
+    y += 10.0;
+    y = draw_section_label(dl, atlas, x, y, w, "SURVIVAL");
 
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "AutoSprint",
+        "Keeps sprint active whenever you move forward",
+        st.config.auto_sprint,
+        FocusId::AutoSprintToggle,
+        focusables,
+    );
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "AutoRespawn",
+        "Automatically respawns right away when you die",
+        st.config.auto_respawn,
+        FocusId::AutoRespawnToggle,
+        focusables,
+    );
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "AutoEat",
+        "Selects food in hotbar and eats below hunger threshold",
+        st.config.auto_eat,
+        FocusId::AutoEatToggle,
+        focusables,
+    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 46.0);
+    {
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 3.0, iw, 40.0),
+            "Eat At Hunger",
+            &format!("<= {}/20", st.config.auto_eat_hunger),
+            st.config.auto_eat_hunger as f32,
+            6.0,
+            19.0,
+            1.0,
+            FocusId::AutoEatHungerSlider,
+            focusables,
+        );
+    }
+    y = next_y;
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "AutoTotem",
+        "Moves a Totem of Undying into your offhand when missing",
+        st.config.auto_totem,
+        FocusId::AutoTotemToggle,
+        focusables,
+    );
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "AutoFish",
+        "Reels in and recasts your fishing rod on a bite",
+        st.config.auto_fish,
+        FocusId::AutoFishToggle,
+        focusables,
+    );
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
+        "AntiAFK",
+        "Occasionally taps sneak when idle to avoid server kicks",
+        st.config.anti_afk,
+        FocusId::AntiAfkToggle,
+        focusables,
+    );
 
+    y
 }
 
 fn render_hud_tab(
@@ -1200,28 +1054,25 @@ fn render_hud_tab(
     w: f32,
     focusables: &mut Vec<Focusable>,
 ) -> f32 {
-    // Top action row
-    let header_rect = Rect::new(x, y, w, 58.0);
-    dl.rect_border(header_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
     dl.text(
         atlas,
         FontKind::UiHeading,
-        x + 16.0,
-        y + 10.0,
-        "On-Screen Survival HUD",
+        x,
+        y + 2.0,
+        "On-Screen HUD",
         palette::TEXT_PRIMARY,
     );
     dl.text(
         atlas,
         FontKind::UiSmall,
-        x + 16.0,
-        y + 32.0,
-        "Toggle widgets below or enter HUD Editor to drag panels anywhere on screen.",
+        x,
+        y + 24.0,
+        "Toggle panels below or drag them freely on screen.",
         palette::TEXT_SECONDARY,
     );
 
-    let reset_btn = Rect::new(x + w - 122.0, y + 13.0, 106.0, 32.0);
-    let edit_btn = Rect::new(reset_btn.x - 124.0, y + 13.0, 114.0, 32.0);
+    let reset_btn = Rect::new(x + w - 98.0, y + 6.0, 98.0, 30.0);
+    let edit_btn = Rect::new(reset_btn.x - 114.0, y + 6.0, 104.0, 30.0);
     draw_action_button(
         st,
         dl,
@@ -1242,88 +1093,63 @@ fn render_hud_tab(
         FocusId::HudResetLayout,
         focusables,
     );
-    y += 72.0;
+    y += 52.0;
+
+    y = draw_section_label(dl, atlas, x, y, w, "WIDGETS");
 
     let rows = [
         (
-            "Coordinates HUD",
-            "Shows live XYZ, facing direction, and dimension.",
+            "Coordinates",
+            "Live position, facing direction, and dimension",
             st.config.hud_coords.enabled,
             FocusId::HudToggleCoords,
         ),
         (
             "Nether Portal Converter",
-            "Displays auto-scaled Overworld/Nether coordinates underneath XYZ.",
+            "Auto-scaled Overworld and Nether coordinates",
             st.config.hud_nether_convert,
             FocusId::HudToggleNether,
         ),
         (
-            "FPS & Fullbright Badge",
-            "Live average FPS, frame time ms, 1% low, and Fullbright indicator.",
+            "FPS & Visual Status",
+            "Clean FPS readout and active mode badge",
             st.config.hud_fps.enabled,
             FocusId::HudToggleFps,
         ),
         (
             "Keystrokes & CPS",
-            "Real-time WASD + Space + LMB/RMB click rate counter.",
+            "WASD, Space, and live click speed",
             st.config.hud_keystrokes.enabled,
             FocusId::HudToggleKeystrokes,
         ),
         (
-            "Vitals, Totems & Target",
-            "Health, hunger, XP level, totem/arrow counts, and crosshair target.",
+            "Vitals & Gear",
+            "Health, food, totems, arrows, and target",
             st.config.hud_vitals.enabled,
             FocusId::HudToggleVitals,
         ),
         (
             "Waypoint Compass",
-            "Directional strip at top showing bearing and distance to waypoints.",
+            "Top directional bar for saved waypoints",
             st.config.hud_compass.enabled,
             FocusId::HudToggleCompass,
         ),
         (
             "World & Session Clock",
-            "In-game day/clock, weather, and play session duration.",
+            "In-game day, time, weather, and play duration",
             st.config.hud_clock.enabled,
             FocusId::HudToggleClock,
         ),
         (
             "Entity Radar",
-            "Top-down minimap showing yourself, players, hostile mobs, and animals.",
+            "Top-down minimap of nearby players and mobs",
             st.config.hud_radar.enabled,
             FocusId::HudToggleRadar,
         ),
     ];
 
     for (title, desc, enabled, fid) in rows {
-        let rr = Rect::new(x, y, w, 54.0);
-        dl.rect_border(rr, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-        dl.text(
-            atlas,
-            FontKind::UiSemi,
-            rr.x + 16.0,
-            rr.y + 9.0,
-            title,
-            palette::TEXT_PRIMARY,
-        );
-        dl.text(
-            atlas,
-            FontKind::UiSmall,
-            rr.x + 16.0,
-            rr.y + 29.0,
-            desc,
-            palette::TEXT_SECONDARY,
-        );
-        draw_toggle_pill(
-            st,
-            dl,
-            atlas,
-            Rect::new(rr.x + w - 82.0, rr.y + 13.0, 66.0, 28.0),
-            enabled,
-            fid,
-            focusables,
-        );
-        y += 62.0;
+        y = draw_module_row(st, dl, atlas, x, y, w, title, desc, enabled, fid, focusables);
     }
 
     y
@@ -1338,22 +1164,17 @@ fn render_waypoints_tab(
     w: f32,
     focusables: &mut Vec<Focusable>,
 ) -> f32 {
-    // Creation row
-    let form_h = 98.0;
-    let form = Rect::new(x, y, w, form_h);
-    dl.rect_border(form, 10.0, palette::SURFACE, 1.0, palette::BORDER);
     dl.text(
         atlas,
         FontKind::UiHeading,
-        form.x + 16.0,
-        form.y + 12.0,
-        "Survival Waypoints",
+        x,
+        y,
+        "Waypoints",
         palette::TEXT_PRIMARY,
     );
-
     let pos_hint = if st.game.in_world {
         format!(
-            "Current: {:.0}, {:.0}, {:.0} ({})",
+            "Current position: {:.0}, {:.0}, {:.0} ({})",
             st.game.pos[0].floor(),
             st.game.pos[1].floor(),
             st.game.pos[2].floor(),
@@ -1363,25 +1184,25 @@ fn render_waypoints_tab(
                 .unwrap_or(&st.game.dimension)
         )
     } else {
-        String::from("Enter a world with agentControl enabled to save your current XYZ.")
+        String::from("Enter a world to save your current coordinates.")
     };
     dl.text(
         atlas,
         FontKind::UiSmall,
-        form.x + 16.0,
-        form.y + 34.0,
+        x,
+        y + 22.0,
         &pos_hint,
         palette::TEXT_SECONDARY,
     );
 
-    let input_w = (w - 190.0).max(160.0);
+    let input_w = (w - 144.0).max(160.0);
     draw_text_input(
         st,
         dl,
         atlas,
-        Rect::new(form.x + 16.0, form.y + 56.0, input_w, 30.0),
+        Rect::new(x, y + 46.0, input_w, 30.0),
         &st.waypoint_draft_name.clone(),
-        "Waypoint name (e.g. Base, Stronghold)...",
+        "Waypoint name (Base, Portal, Stronghold)...",
         st.active_text_target == Some(TextTarget::WaypointName),
         st.focused == Some(FocusId::WaypointInput),
         FocusId::WaypointInput,
@@ -1389,60 +1210,49 @@ fn render_waypoints_tab(
         focusables,
     );
 
-    let add_rect = Rect::new(form.x + 26.0 + input_w, form.y + 56.0, 146.0, 30.0);
+    let add_rect = Rect::new(x + input_w + 10.0, y + 46.0, 134.0, 30.0);
     draw_action_button_enabled(
         st,
         dl,
         atlas,
         add_rect,
-        if st.game.in_world {
-            "Save Current XYZ"
-        } else {
-            "Not in World"
-        },
+        if st.game.in_world { "Save Current" } else { "Not in World" },
         st.game.in_world,
         st.game.in_world,
         FocusId::WaypointAddHere,
         focusables,
     );
+    y += 92.0;
 
-    y += form_h + 14.0;
+    y = draw_section_label(dl, atlas, x, y, w, "SAVED MARKERS");
 
     if st.config.waypoints.is_empty() {
-        let empty = Rect::new(x, y, w, 86.0);
-        dl.rect_border(empty, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-        dl.text(
-            atlas,
-            FontKind::UiSemi,
-            empty.x + 18.0,
-            empty.y + 18.0,
-            "No waypoints saved yet",
-            palette::TEXT_PRIMARY,
-        );
         dl.text(
             atlas,
             FontKind::UiSmall,
-            empty.x + 18.0,
-            empty.y + 42.0,
-            "Type a name above and click Save Current XYZ to pin it to your HUD compass.",
+            x,
+            y + 6.0,
+            "No waypoints saved yet. Name one above to pin it to your compass.",
             palette::TEXT_SECONDARY,
         );
-        return y + 86.0;
+        return y + 34.0;
     }
 
     for (idx, wp) in st.config.waypoints.iter().enumerate() {
-        let rr = Rect::new(x, y, w, 54.0);
-        dl.rect_border(rr, 8.0, palette::SURFACE, 1.0, palette::BORDER);
+        let rr = Rect::new(x, y, w, 46.0);
+        if rr.contains(st.cursor_pos[0], st.cursor_pos[1]) {
+            dl.rect(rr, 6.0, palette::SURFACE.with_alpha(0.7));
+        }
         dl.rect(
-            Rect::new(rr.x + 14.0, rr.y + 19.0, 10.0, 16.0),
+            Rect::new(rr.x + 6.0, rr.y + 14.0, 8.0, 18.0),
             3.0,
             waypoint_color(wp.color_idx),
         );
         dl.text(
             atlas,
             FontKind::UiSemi,
-            rr.x + 34.0,
-            rr.y + 9.0,
+            rr.x + 22.0,
+            rr.y + 6.0,
             &wp.name,
             palette::TEXT_PRIMARY,
         );
@@ -1451,30 +1261,22 @@ fn render_waypoints_tab(
             let dx = wp.x as f64 - st.game.pos[0];
             let dz = wp.z as f64 - st.game.pos[2];
             let d = (dx * dx + dz * dz).sqrt();
-            format!("{} / {} / {} · {} · {:.0}m away", wp.x, wp.y, wp.z, dim, d)
+            format!("{}, {}, {} · {} · {:.0}m", wp.x, wp.y, wp.z, dim, d)
         } else {
-            format!("{} / {} / {} · {}", wp.x, wp.y, wp.z, dim)
+            format!("{}, {}, {} · {}", wp.x, wp.y, wp.z, dim)
         };
         dl.text(
             atlas,
             FontKind::MonoSmall,
-            rr.x + 34.0,
-            rr.y + 30.0,
+            rr.x + 22.0,
+            rr.y + 25.0,
             &meta,
             palette::TEXT_SECONDARY,
         );
 
-        let del_rect = Rect::new(rr.x + w - 78.0, rr.y + 13.0, 64.0, 28.0);
-        let tog_rect = Rect::new(del_rect.x - 76.0, rr.y + 13.0, 66.0, 28.0);
-        draw_toggle_pill(
-            st,
-            dl,
-            atlas,
-            tog_rect,
-            wp.enabled,
-            FocusId::WaypointItemToggle(idx),
-            focusables,
-        );
+        let del_rect = Rect::new(rr.x + w - 64.0, rr.y + 10.0, 58.0, 26.0);
+        let sw_rect = Rect::new(del_rect.x - 48.0, rr.y + 13.0, 38.0, 20.0);
+        draw_switch(st, dl, sw_rect, wp.enabled, FocusId::WaypointItemToggle(idx), focusables);
         draw_action_button(
             st,
             dl,
@@ -1485,13 +1287,14 @@ fn render_waypoints_tab(
             FocusId::WaypointItemDelete(idx),
             focusables,
         );
-        y += 62.0;
+        y += 48.0;
+        draw_hairline(dl, x, y - 1.0, w);
     }
 
     y
 }
 
-fn render_system_tab(
+fn render_settings_tab(
     st: &AppState,
     dl: &mut DrawList,
     atlas: &FontAtlas,
@@ -1500,81 +1303,65 @@ fn render_system_tab(
     w: f32,
     focusables: &mut Vec<Focusable>,
 ) -> f32 {
-    let diag = Rect::new(x, y, w, 178.0);
-    dl.rect_border(diag, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiHeading,
-        diag.x + 16.0,
-        diag.y + 14.0,
-        "Injection & Diagnostics",
-        palette::TEXT_PRIMARY,
-    );
+    y = draw_section_label(dl, atlas, x, y, w, "PERFORMANCE");
 
-    let rows = [
-        ("Vulkan Adapter", st.gpu_name.clone()),
-        (
-            "Swapchain Target",
-            format!("{} x {} px", st.screen_size[0], st.screen_size[1]),
-        ),
-        (
-            "Lightmap Intercept",
-            if st.lightmap_hooked {
-                format!("Active ({} 16x16 image tracked)", st.lightmap_images_seen)
-            } else {
-                String::from("Waiting for world lightmap upload")
-            },
-        ),
-        (
-            "Horizon Socket",
-            if st.game.socket_connected {
-                format!("Connected (screen: {})", st.game.screen)
-            } else {
-                String::from("Offline (set agentControl:true in horizon-extras.txt)")
-            },
-        ),
-        ("Menu Toggle Keys", String::from("Grave [`] or Tilde [~] · Close [Esc]")),
-        (
-            "Config File",
-            KestrelConfig::config_path().display().to_string(),
-        ),
-    ];
-
-    for (i, (k, v)) in rows.iter().enumerate() {
-        let ry = diag.y + 46.0 + i as f32 * 21.0;
-        dl.text(atlas, FontKind::UiSmall, diag.x + 16.0, ry, k, palette::TEXT_SECONDARY);
-        dl.text(atlas, FontKind::MonoSmall, diag.x + 178.0, ry, v, palette::TEXT_PRIMARY);
-    }
-
-    y += 194.0;
-
-    let actions = Rect::new(x, y, w, 64.0);
-    dl.rect_border(actions, 10.0, palette::SURFACE, 1.0, palette::BORDER);
     dl.text(
         atlas,
         FontKind::UiSemi,
-        actions.x + 16.0,
-        actions.y + 12.0,
-        "Configuration Persistence",
+        x + 4.0,
+        y + 4.0,
+        "X-Ray & ESP Scan Mode",
         palette::TEXT_PRIMARY,
     );
     dl.text(
         atlas,
         FontKind::UiSmall,
-        actions.x + 16.0,
-        actions.y + 34.0,
-        "Changes auto-save on toggle, or write manually now.",
+        x + 4.0,
+        y + 23.0,
+        "Full uses original scan density & range; Balanced or Lite reduces CPU load.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_cycle_chip(
+        st,
+        dl,
+        atlas,
+        Rect::new(x + w - 168.0, y + 6.0, 164.0, 28.0),
+        "Mode",
+        st.config.perf_profile.label(),
+        FocusId::PerfProfileCycle,
+        focusables,
+    );
+    y += 50.0;
+    draw_hairline(dl, x, y, w);
+
+    y += 8.0;
+    y = draw_section_label(dl, atlas, x, y, w, "CONFIGURATION");
+
+    dl.text(
+        atlas,
+        FontKind::UiSemi,
+        x + 4.0,
+        y + 4.0,
+        "Save or Reset Settings",
+        palette::TEXT_PRIMARY,
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        x + 4.0,
+        y + 23.0,
+        "Settings auto-save on change. Reset restores default configuration.",
         palette::TEXT_SECONDARY,
     );
 
-    let reset_all = Rect::new(actions.x + w - 134.0, actions.y + 16.0, 118.0, 32.0);
-    let save_now = Rect::new(reset_all.x - 128.0, actions.y + 16.0, 118.0, 32.0);
+    let reset_all = Rect::new(x + w - 112.0, y + 7.0, 108.0, 28.0);
+    let save_now = Rect::new(reset_all.x - 106.0, y + 7.0, 98.0, 28.0);
     draw_action_button(
         st,
         dl,
         atlas,
         save_now,
-        "Save Config",
+        "Save Now",
         true,
         FocusId::SystemSaveConfig,
         focusables,
@@ -1584,46 +1371,47 @@ fn render_system_tab(
         dl,
         atlas,
         reset_all,
-        "Reset Defaults",
+        "Reset All",
         false,
         FocusId::SystemResetAll,
         focusables,
     );
+    y += 52.0;
+    draw_hairline(dl, x, y, w);
 
-    y += 78.0;
+    y += 8.0;
+    y = draw_section_label(dl, atlas, x, y, w, "ENVIRONMENT");
 
-    let perf = Rect::new(x, y, w, 92.0);
-    dl.rect_border(perf, 10.0, palette::SURFACE, 1.0, palette::BORDER);
-    dl.text(
-        atlas,
-        FontKind::UiSemi,
-        perf.x + 16.0,
-        perf.y + 12.0,
-        "X-Ray & ESP Performance",
-        palette::TEXT_PRIMARY,
-    );
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        perf.x + 16.0,
-        perf.y + 34.0,
-        "Choose Full (original density & range), Balanced, or Lite Boost for low-end PCs.",
-        palette::TEXT_SECONDARY,
-    );
-    draw_cycle_row(
-        st,
-        dl,
-        atlas,
-        Rect::new(perf.x + 16.0, perf.y + 56.0, w - 32.0, 26.0),
-        "Scan & Render Mode",
-        st.config.perf_profile.label(),
-        FocusId::PerfProfileCycle,
-        focusables,
-    );
+    let rows = [
+        ("GPU", st.gpu_name.clone()),
+        ("Resolution", format!("{} x {}", st.screen_size[0], st.screen_size[1])),
+        (
+            "Fullbright Hook",
+            if st.lightmap_hooked {
+                String::from("Active")
+            } else {
+                String::from("Waiting for world")
+            },
+        ),
+        (
+            "Game Link",
+            if st.game.socket_connected {
+                String::from("Connected")
+            } else {
+                String::from("Standby")
+            },
+        ),
+        ("Menu Keys", String::from("~ or ` to toggle · Esc to close")),
+        ("Config Path", KestrelConfig::config_path().display().to_string()),
+    ];
 
-    y + 92.0
+    for (k, v) in rows {
+        dl.text(atlas, FontKind::UiSmall, x + 4.0, y + 4.0, k, palette::TEXT_SECONDARY);
+        dl.text(atlas, FontKind::MonoSmall, x + 144.0, y + 4.0, &v, palette::TEXT_PRIMARY);
+        y += 22.0;
+    }
 
-
+    y + 8.0
 }
 
 fn render_search_results(
@@ -1636,25 +1424,17 @@ fn render_search_results(
     q: &str,
     focusables: &mut Vec<Focusable>,
 ) -> f32 {
-    dl.text(
-        atlas,
-        FontKind::UiSmall,
-        x,
-        y,
-        &format!("Filtering by \"{q}\""),
-        palette::ACCENT,
-    );
-    y += 24.0;
+    y = draw_section_label(dl, atlas, x, y, w, "SEARCH RESULTS");
 
     let items: [(&str, &str, bool, FocusId); 27] = [
-        ("Fullbright", "Lights up dark caves and night areas", st.config.fullbright_enabled, FocusId::FullbrightToggle),
-        ("Ore X-Ray (3D ESP)", "Spot buried Diamond, Debris, Gold, Iron", st.config.xray_ores, FocusId::XrayOresToggle),
+        ("Fullbright", "Brightens caves and night areas", st.config.fullbright_enabled, FocusId::FullbrightToggle),
+        ("Ore X-Ray", "3D boxes for buried Diamond, Debris, Gold, Iron", st.config.xray_ores, FocusId::XrayOresToggle),
         ("Cave Wireframe", "See underground tunnels and lava pockets", st.config.xray_terrain, FocusId::XrayTerrainToggle),
         ("Chest & Mob Through-Walls", "Show chests and mobs behind walls", st.config.xray_entities, FocusId::XrayEntitiesToggle),
-        ("Entity ESP", "Draw boxes around players, mobs, and loot", st.config.esp_enabled, FocusId::EspToggle),
-        ("Tracers", "Draw guide lines to nearby players and mobs", st.config.tracers_enabled, FocusId::TracersToggle),
+        ("Entity ESP Boxes", "Draw boxes around players, mobs, and loot", st.config.esp_enabled, FocusId::EspToggle),
+        ("Tracers", "Guide lines to nearby players and mobs", st.config.tracers_enabled, FocusId::TracersToggle),
         ("Freecam", "Scout freely while your character stays still", st.config.freecam_enabled, FocusId::FreecamToggle),
-        ("AimAssist", "Gently aims toward nearby zombies or players", st.config.aim_assist, FocusId::AimAssistToggle),
+        ("AimAssist", "Gently aims toward nearby targets", st.config.aim_assist, FocusId::AimAssistToggle),
         ("Criticals", "Micro-jump on attack for 1.5x critical hits", st.config.criticals_enabled, FocusId::CriticalsToggle),
         ("Entity Radar", "Top-down minimap of players and mobs", st.config.hud_radar.enabled, FocusId::HudToggleRadar),
         ("AutoSprint", "Keeps sprint active while moving forward", st.config.auto_sprint, FocusId::AutoSprintToggle),
@@ -1671,7 +1451,7 @@ fn render_search_results(
         ("OptiZoom", "Hold key to zoom in", st.config.zoom_enabled, FocusId::ZoomToggle),
         ("Crosshair+", "Custom reticle overlay", st.config.crosshair_enabled, FocusId::CrosshairToggle),
         ("Coordinates HUD", "Coordinates and Nether portal converter", st.config.hud_coords.enabled, FocusId::HudToggleCoords),
-        ("FPS & Status HUD", "FPS and active visual modes", st.config.hud_fps.enabled, FocusId::HudToggleFps),
+        ("FPS & Visual Status", "FPS and active visual modes", st.config.hud_fps.enabled, FocusId::HudToggleFps),
         ("Keystrokes & CPS", "Live movement keys and click speed", st.config.hud_keystrokes.enabled, FocusId::HudToggleKeystrokes),
         ("Waypoint Compass", "Directional compass for saved markers", st.config.hud_compass.enabled, FocusId::HudToggleCompass),
     ];
@@ -1680,114 +1460,283 @@ fn render_search_results(
     for (name, desc, on, fid) in items {
         if name.to_lowercase().contains(q) || desc.to_lowercase().contains(q) {
             matched += 1;
-            let rr = Rect::new(x, y, w, 54.0);
-            dl.rect_border(rr, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-            dl.text(atlas, FontKind::UiSemi, rr.x + 16.0, rr.y + 9.0, name, palette::TEXT_PRIMARY);
-            dl.text(atlas, FontKind::UiSmall, rr.x + 16.0, rr.y + 29.0, desc, palette::TEXT_SECONDARY);
-            draw_toggle_pill(
-                st,
-                dl,
-                atlas,
-                Rect::new(rr.x + w - 82.0, rr.y + 13.0, 66.0, 28.0),
-                on,
-                fid,
-                focusables,
-            );
-            y += 62.0;
+            y = draw_module_row(st, dl, atlas, x, y, w, name, desc, on, fid, focusables);
         }
     }
 
     for (idx, wp) in st.config.waypoints.iter().enumerate() {
         if wp.name.to_lowercase().contains(q) {
             matched += 1;
-            let rr = Rect::new(x, y, w, 54.0);
-            dl.rect_border(rr, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-            dl.text(atlas, FontKind::UiSemi, rr.x + 16.0, rr.y + 9.0, &wp.name, palette::TEXT_PRIMARY);
-            let coords = format!("Waypoint {} / {} / {}", wp.x, wp.y, wp.z);
-            dl.text(atlas, FontKind::MonoSmall, rr.x + 16.0, rr.y + 29.0, &coords, palette::TEXT_SECONDARY);
-            draw_toggle_pill(
+            let coords = format!("Waypoint · {}, {}, {}", wp.x, wp.y, wp.z);
+            y = draw_module_row(
                 st,
                 dl,
                 atlas,
-                Rect::new(rr.x + w - 82.0, rr.y + 13.0, 66.0, 28.0),
+                x,
+                y,
+                w,
+                &wp.name,
+                &coords,
                 wp.enabled,
                 FocusId::WaypointItemToggle(idx),
                 focusables,
             );
-            y += 62.0;
         }
     }
 
     if matched == 0 {
-        let empty = Rect::new(x, y, w, 72.0);
-        dl.rect_border(empty, 8.0, palette::SURFACE, 1.0, palette::BORDER);
-        dl.text(
-            atlas,
-            FontKind::UiSemi,
-            empty.x + 16.0,
-            empty.y + 14.0,
-            "No matching modules or waypoints",
-            palette::TEXT_PRIMARY,
-        );
         dl.text(
             atlas,
             FontKind::UiSmall,
-            empty.x + 16.0,
-            empty.y + 36.0,
-            "Clear the search box or try 'fullbright', 'zoom', 'coords', or 'fps'.",
+            x + 4.0,
+            y + 8.0,
+            "No matching modules or waypoints. Clear search to return.",
             palette::TEXT_SECONDARY,
         );
-        y += 72.0;
+        y += 32.0;
     }
 
     y
 }
 
 // ---------------------------------------------------------
-// Reusable UI Widgets (all keyboard + mouse accessible)
+// Crafted Minimal Components (Switches, Hairlines, Strips)
 // ---------------------------------------------------------
 
-fn draw_quick_fb_pill(
+fn draw_section_label(
+    dl: &mut DrawList,
+    atlas: &FontAtlas,
+    x: f32,
+    y: f32,
+    w: f32,
+    title: &str,
+) -> f32 {
+    dl.text(
+        atlas,
+        FontKind::MonoSmall,
+        x + 2.0,
+        y,
+        title,
+        palette::ACCENT.with_alpha(0.9),
+    );
+    let tw = atlas.measure(FontKind::MonoSmall, title);
+    dl.rect(
+        Rect::new(x + tw + 12.0, y + 6.0, (w - tw - 12.0).max(0.0), 1.0),
+        0.0,
+        palette::BORDER.with_alpha(0.45),
+    );
+    y + 22.0
+}
+
+fn draw_hairline(dl: &mut DrawList, x: f32, y: f32, w: f32) {
+    dl.rect(Rect::new(x + 4.0, y, w - 8.0, 1.0), 0.0, palette::BORDER.with_alpha(0.32));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_module_row(
+    st: &AppState,
+    dl: &mut DrawList,
+    atlas: &FontAtlas,
+    x: f32,
+    y: f32,
+    w: f32,
+    title: &str,
+    desc: &str,
+    on: bool,
+    fid: FocusId,
+    focusables: &mut Vec<Focusable>,
+) -> f32 {
+    let row = Rect::new(x, y, w, 46.0);
+    let hovered = row.contains(st.cursor_pos[0], st.cursor_pos[1]);
+    let focused = st.focused == Some(fid);
+
+    if hovered {
+        dl.rect(row, 6.0, palette::SURFACE.with_alpha(0.72));
+    }
+    if focused {
+        dl.rect_border(row, 6.0, Color::hex(0x000000, 0.0), 1.0, palette::ACCENT);
+    }
+
+    dl.text(
+        atlas,
+        FontKind::UiSemi,
+        row.x + 8.0,
+        row.y + 6.0,
+        title,
+        palette::TEXT_PRIMARY,
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        row.x + 8.0,
+        row.y + 25.0,
+        desc,
+        palette::TEXT_SECONDARY,
+    );
+
+    let sw_r = Rect::new(row.x + row.w - 44.0, row.y + 13.0, 36.0, 20.0);
+    draw_switch_visual(dl, sw_r, on, hovered || focused);
+    focusables.push(Focusable {
+        id: fid,
+        rect: row,
+        kind: ControlKind::Toggle,
+    });
+
+    let next_y = y + 46.0;
+    draw_hairline(dl, x, next_y - 0.5, w);
+    next_y
+}
+
+fn draw_inset_bg(
+    dl: &mut DrawList,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> (f32, f32, f32, f32) {
+    let strip = Rect::new(x + 8.0, y + 4.0, w - 16.0, h);
+    dl.rect(strip, 6.0, palette::SURFACE.with_alpha(0.68));
+    dl.rect(
+        Rect::new(strip.x, strip.y + 6.0, 2.0, strip.h - 12.0),
+        1.0,
+        palette::ACCENT.with_alpha(0.75),
+    );
+    (strip.x + 12.0, strip.y, strip.w - 22.0, y + h + 8.0)
+}
+
+fn draw_switch_visual(dl: &mut DrawList, r: Rect, on: bool, highlight: bool) {
+    let track_col = if on {
+        palette::ACCENT
+    } else if highlight {
+        palette::SURFACE_HOVER
+    } else {
+        Color::hex(0x232934, 1.0)
+    };
+    let border_col = if on {
+        palette::ACCENT
+    } else {
+        palette::BORDER_STRONG.with_alpha(0.65)
+    };
+    dl.rect_border(r, r.h * 0.5, track_col, 1.0, border_col);
+
+    let knob_sz = r.h - 6.0;
+    let kx = if on {
+        r.x + r.w - knob_sz - 3.0
+    } else {
+        r.x + 3.0
+    };
+    let knob_col = if on {
+        palette::CANVAS_SOLID
+    } else {
+        palette::TEXT_PRIMARY.with_alpha(0.9)
+    };
+    dl.rect(
+        Rect::new(kx, r.y + 3.0, knob_sz, knob_sz),
+        knob_sz * 0.5,
+        knob_col,
+    );
+}
+
+fn draw_switch(
+    st: &AppState,
+    dl: &mut DrawList,
+    r: Rect,
+    on: bool,
+    fid: FocusId,
+    focusables: &mut Vec<Focusable>,
+) {
+    let hovered = r.contains(st.cursor_pos[0], st.cursor_pos[1]);
+    let focused = st.focused == Some(fid);
+    draw_switch_visual(dl, r, on, hovered || focused);
+    focusables.push(Focusable {
+        id: fid,
+        rect: r,
+        kind: ControlKind::Toggle,
+    });
+}
+
+fn draw_top_pill(
     st: &AppState,
     dl: &mut DrawList,
     atlas: &FontAtlas,
     r: Rect,
+    label: &str,
+    danger: bool,
+    fid: FocusId,
     focusables: &mut Vec<Focusable>,
 ) {
-    let on = st.config.fullbright_enabled;
     let hovered = r.contains(st.cursor_pos[0], st.cursor_pos[1]);
-    let focused = st.focused == Some(FocusId::QuickFullbright);
-    let bg = if on {
-        palette::SUCCESS_SOFT
+    let focused = st.focused == Some(fid);
+    let bg = if danger && hovered {
+        palette::DANGER.with_alpha(0.22)
     } else if hovered {
         palette::SURFACE_HOVER
     } else {
-        palette::SURFACE
+        palette::SURFACE.with_alpha(0.8)
+    };
+    let fg = if danger && hovered {
+        palette::DANGER
+    } else {
+        palette::TEXT_PRIMARY
     };
     let border = if focused {
         palette::ACCENT
-    } else if on {
-        palette::SUCCESS
+    } else if danger && hovered {
+        palette::DANGER.with_alpha(0.75)
     } else {
-        palette::BORDER_STRONG
+        palette::BORDER.with_alpha(0.8)
     };
-    dl.rect_border(r, 7.0, bg, if focused { 2.0 } else { 1.0 }, border);
-    let label = if on { "Fullbright: ON" } else { "Fullbright: OFF" };
-    let tw = atlas.measure(FontKind::UiSemi, label);
+    dl.rect_border(r, 6.0, bg, 1.0, border);
+    let tw = atlas.measure(FontKind::UiSmall, label);
     dl.text(
         atlas,
-        FontKind::UiSemi,
+        FontKind::UiSmall,
         r.x + (r.w - tw) * 0.5,
-        r.y + 8.0,
+        r.y + 7.0,
         label,
-        if on {
-            palette::SUCCESS
-        } else {
-            palette::TEXT_PRIMARY
-        },
+        fg,
     );
     focusables.push(Focusable {
-        id: FocusId::QuickFullbright,
+        id: fid,
+        rect: r,
+        kind: ControlKind::Button,
+    });
+}
+
+fn draw_close_button(
+    st: &AppState,
+    dl: &mut DrawList,
+    _atlas: &FontAtlas,
+    r: Rect,
+    focusables: &mut Vec<Focusable>,
+) {
+    let hovered = r.contains(st.cursor_pos[0], st.cursor_pos[1]);
+    let focused = st.focused == Some(FocusId::CloseBtn);
+    let bg = if hovered {
+        palette::SURFACE_HOVER
+    } else {
+        Color::hex(0x000000, 0.0)
+    };
+    if hovered || focused {
+        dl.rect_border(
+            r,
+            6.0,
+            bg,
+            1.0,
+            if focused { palette::ACCENT } else { palette::BORDER },
+        );
+    }
+    let col = if hovered {
+        palette::TEXT_PRIMARY
+    } else {
+        palette::TEXT_SECONDARY
+    };
+    let cx = r.x + r.w * 0.5;
+    let cy = r.y + r.h * 0.5;
+    dl.line([cx - 4.5, cy - 4.5], [cx + 4.5, cy + 4.5], 1.6, col);
+    dl.line([cx + 4.5, cy - 4.5], [cx - 4.5, cy + 4.5], 1.6, col);
+    focusables.push(Focusable {
+        id: FocusId::CloseBtn,
         rect: r,
         kind: ControlKind::Button,
     });
@@ -1820,37 +1769,25 @@ fn draw_action_button_enabled(
     let hovered = enabled && r.contains(st.cursor_pos[0], st.cursor_pos[1]);
     let focused = st.focused == Some(fid);
     let (bg, fg, border) = if !enabled {
-        (palette::SURFACE, palette::TEXT_SECONDARY.with_alpha(0.55), palette::BORDER)
+        (palette::SURFACE, palette::TEXT_SECONDARY.with_alpha(0.5), palette::BORDER)
     } else if primary {
-        let b = if hovered {
-            Color::hex(0xF2B94F, 1.0)
-        } else {
-            palette::ACCENT
-        };
+        let b = if hovered { Color::hex(0xF2B94F, 1.0) } else { palette::ACCENT };
         (b, palette::CANVAS_SOLID, if focused { palette::TEXT_PRIMARY } else { b })
     } else {
-        let b = if hovered {
-            palette::SURFACE_HOVER
-        } else {
-            palette::SURFACE
-        };
+        let b = if hovered { palette::SURFACE_HOVER } else { palette::SURFACE };
         (
             b,
             palette::TEXT_PRIMARY,
-            if focused {
-                palette::ACCENT
-            } else {
-                palette::BORDER_STRONG
-            },
+            if focused { palette::ACCENT } else { palette::BORDER_STRONG.with_alpha(0.7) },
         )
     };
-    dl.rect_border(r, 7.0, bg, if focused { 2.0 } else { 1.0 }, border);
-    let tw = atlas.measure(FontKind::UiSemi, label);
+    dl.rect_border(r, 6.0, bg, 1.0, border);
+    let tw = atlas.measure(FontKind::UiSmall, label);
     dl.text(
         atlas,
-        FontKind::UiSemi,
+        FontKind::UiSmall,
         r.x + (r.w - tw) * 0.5,
-        r.y + (r.h - 16.0) * 0.5,
+        r.y + (r.h - 14.0) * 0.5,
         label,
         fg,
     );
@@ -1861,53 +1798,6 @@ fn draw_action_button_enabled(
             kind: ControlKind::Button,
         });
     }
-}
-
-fn draw_toggle_pill(
-    st: &AppState,
-    dl: &mut DrawList,
-    atlas: &FontAtlas,
-    r: Rect,
-    on: bool,
-    fid: FocusId,
-    focusables: &mut Vec<Focusable>,
-) {
-    let hovered = r.contains(st.cursor_pos[0], st.cursor_pos[1]);
-    let focused = st.focused == Some(fid);
-    let bg = if on {
-        palette::SUCCESS
-    } else if hovered {
-        palette::SURFACE_HOVER
-    } else {
-        palette::CANVAS_SOLID
-    };
-    let border = if focused {
-        palette::ACCENT
-    } else if on {
-        palette::SUCCESS
-    } else {
-        palette::BORDER_STRONG
-    };
-    dl.rect_border(r, 7.0, bg, if focused { 2.0 } else { 1.0 }, border);
-    let txt = if on { "ON" } else { "OFF" };
-    let tw = atlas.measure(FontKind::UiSemi, txt);
-    dl.text(
-        atlas,
-        FontKind::UiSemi,
-        r.x + (r.w - tw) * 0.5,
-        r.y + (r.h - 16.0) * 0.5,
-        txt,
-        if on {
-            palette::CANVAS_SOLID
-        } else {
-            palette::TEXT_PRIMARY
-        },
-    );
-    focusables.push(Focusable {
-        id: fid,
-        rect: r,
-        kind: ControlKind::Toggle(on),
-    });
 }
 
 fn draw_segment_button(
@@ -1927,22 +1817,22 @@ fn draw_segment_button(
     } else if hovered {
         palette::SURFACE_HOVER
     } else {
-        palette::CANVAS_SOLID
+        palette::CANVAS_SOLID.with_alpha(0.7)
     };
     let border = if focused {
         palette::TEXT_PRIMARY
     } else if active {
         palette::ACCENT
     } else {
-        palette::BORDER_STRONG
+        palette::BORDER.with_alpha(0.8)
     };
-    dl.rect_border(r, 6.0, bg, if focused { 2.0 } else { 1.0 }, border);
-    let tw = atlas.measure(FontKind::UiSemi, label);
+    dl.rect_border(r, 5.0, bg, 1.0, border);
+    let tw = atlas.measure(FontKind::UiSmall, label);
     dl.text(
         atlas,
-        FontKind::UiSemi,
+        FontKind::UiSmall,
         r.x + (r.w - tw) * 0.5,
-        r.y + 7.0,
+        r.y + (r.h - 14.0) * 0.5,
         label,
         if active {
             palette::CANVAS_SOLID
@@ -1957,7 +1847,7 @@ fn draw_segment_button(
     });
 }
 
-fn draw_cycle_row(
+fn draw_cycle_chip(
     st: &AppState,
     dl: &mut DrawList,
     atlas: &FontAtlas,
@@ -1972,21 +1862,21 @@ fn draw_cycle_row(
     let bg = if hovered {
         palette::SURFACE_HOVER
     } else {
-        palette::CANVAS_SOLID
+        palette::CANVAS_SOLID.with_alpha(0.75)
     };
     let border = if focused {
         palette::ACCENT
     } else {
-        palette::BORDER_STRONG
+        palette::BORDER.with_alpha(0.85)
     };
-    dl.rect_border(r, 6.0, bg, if focused { 2.0 } else { 1.0 }, border);
-    dl.text(atlas, FontKind::UiSmall, r.x + 10.0, r.y + 8.0, label, palette::TEXT_SECONDARY);
-    let vw = atlas.measure(FontKind::UiSemi, value);
+    dl.rect_border(r, 5.0, bg, 1.0, border);
+    dl.text(atlas, FontKind::UiSmall, r.x + 8.0, r.y + 6.0, label, palette::TEXT_SECONDARY);
+    let vw = atlas.measure(FontKind::UiSmall, value);
     dl.text(
         atlas,
-        FontKind::UiSemi,
-        r.x + r.w - vw - 10.0,
-        r.y + 7.0,
+        FontKind::UiSmall,
+        r.x + r.w - vw - 8.0,
+        r.y + 6.0,
         value,
         palette::ACCENT,
     );
@@ -2012,45 +1902,36 @@ fn draw_slider(
     fid: FocusId,
     focusables: &mut Vec<Focusable>,
 ) {
-    dl.text(atlas, FontKind::UiSmall, r.x, r.y, label, palette::TEXT_SECONDARY);
+    dl.text(atlas, FontKind::UiSmall, r.x, r.y + 1.0, label, palette::TEXT_SECONDARY);
     let vw = atlas.measure(FontKind::MonoSmall, val_text);
     dl.text(
         atlas,
         FontKind::MonoSmall,
         r.x + r.w - vw,
-        r.y,
+        r.y + 1.0,
         val_text,
         palette::TEXT_PRIMARY,
     );
 
-    let track = Rect::new(r.x, r.y + 24.0, r.w, 10.0);
-    let focused = st.focused == Some(fid);
+    let track = Rect::new(r.x, r.y + 23.0, r.w, 4.0);
+    let focused = st.focused == Some(fid) || st.active_slider == Some(fid);
     let t = ((val - min) / (max - min).max(0.0001)).clamp(0.0, 1.0);
+    dl.rect(track, 2.0, Color::hex(0x232A36, 1.0));
+    let fill_w = (track.w * t).max(4.0);
+    dl.rect(Rect::new(track.x, track.y, fill_w, track.h), 2.0, palette::ACCENT);
+
+    let knob_x = (track.x + track.w * t - 6.0).clamp(track.x, track.x + track.w - 12.0);
     dl.rect_border(
-        track,
-        5.0,
-        palette::CANVAS_SOLID,
-        if focused { 1.5 } else { 1.0 },
-        if focused {
-            palette::ACCENT
-        } else {
-            palette::BORDER_STRONG
-        },
-    );
-    let fill_w = (track.w * t).max(8.0);
-    dl.rect(Rect::new(track.x, track.y, fill_w, track.h), 5.0, palette::ACCENT);
-    let knob_x = (track.x + track.w * t - 7.0).clamp(track.x, track.x + track.w - 14.0);
-    dl.rect_border(
-        Rect::new(knob_x, track.y - 3.0, 14.0, 16.0),
-        7.0,
+        Rect::new(knob_x, track.y - 4.0, 12.0, 12.0),
+        6.0,
         palette::TEXT_PRIMARY,
-        1.5,
-        palette::CANVAS_SOLID,
+        if focused { 1.8 } else { 1.0 },
+        if focused { palette::ACCENT } else { palette::CANVAS_SOLID },
     );
 
     focusables.push(Focusable {
         id: fid,
-        rect: Rect::new(r.x, r.y + 14.0, r.w, 28.0),
+        rect: Rect::new(r.x, r.y + 12.0, r.w, 24.0),
         kind: ControlKind::Slider(min, max, step),
     });
 }
@@ -2072,13 +1953,13 @@ fn draw_text_input(
     let border = if editing || focused {
         palette::ACCENT
     } else {
-        palette::BORDER_STRONG
+        palette::BORDER.with_alpha(0.8)
     };
     dl.rect_border(
         r,
-        7.0,
-        palette::CANVAS_SOLID,
-        if editing || focused { 1.5 } else { 1.0 },
+        6.0,
+        palette::CANVAS_SOLID.with_alpha(0.75),
+        1.0,
         border,
     );
     dl.push_scissor(Rect::new(r.x + 8.0, r.y + 2.0, r.w - 16.0, r.h - 4.0));
@@ -2086,24 +1967,24 @@ fn draw_text_input(
         dl.text(
             atlas,
             FontKind::UiSmall,
-            r.x + 10.0,
-            r.y + 8.0,
+            r.x + 9.0,
+            r.y + 7.0,
             placeholder,
-            palette::TEXT_SECONDARY,
+            palette::TEXT_SECONDARY.with_alpha(0.8),
         );
     } else {
         dl.text(
             atlas,
-            FontKind::UiBody,
-            r.x + 10.0,
+            FontKind::UiSmall,
+            r.x + 9.0,
             r.y + 7.0,
             text,
             palette::TEXT_PRIMARY,
         );
         if editing {
-            let cw = atlas.measure(FontKind::UiBody, text);
+            let cw = atlas.measure(FontKind::UiSmall, text);
             dl.rect(
-                Rect::new(r.x + 11.0 + cw, r.y + 6.0, 1.5, r.h - 12.0),
+                Rect::new(r.x + 10.0 + cw, r.y + 6.0, 1.5, r.h - 12.0),
                 0.5,
                 palette::ACCENT,
             );
@@ -2124,8 +2005,7 @@ fn draw_text_input(
 fn process_interactions(st: &mut AppState, focusables: &[Focusable]) {
     let [mx, my] = st.cursor_pos;
 
-    // 1. Mouse clicks
-    if st.mouse_just_pressed {
+    if st.mouse_just_pressed && st.dragging_menu.is_none() {
         let mut hit_text = None;
         for f in focusables {
             if f.rect.contains(mx, my) {
@@ -2138,7 +2018,7 @@ fn process_interactions(st: &mut AppState, focusables: &[Focusable]) {
                     ControlKind::Text(target) => {
                         hit_text = Some(target);
                     }
-                    ControlKind::Button | ControlKind::Toggle(_) => {
+                    ControlKind::Button | ControlKind::Toggle => {
                         activate_control(st, f.id);
                     }
                 }
@@ -2163,7 +2043,6 @@ fn process_interactions(st: &mut AppState, focusables: &[Focusable]) {
         st.active_slider = None;
     }
 
-    // 2. Typed text characters
     let chars: Vec<char> = st.pending_chars.drain(..).collect();
     if let Some(target) = st.active_text_target {
         for ch in chars {
@@ -2179,7 +2058,6 @@ fn process_interactions(st: &mut AppState, focusables: &[Focusable]) {
         }
     }
 
-    // 3. Keyboard navigation & activation (R-32)
     let keys: Vec<UiKey> = st.pending_keys.drain(..).collect();
     for key in keys {
         match key {
@@ -2425,7 +2303,7 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.speed_mine = false;
             st.config.auto_tool = false;
             st.lightmap_dirty = true;
-            st.set_toast("Panic: all survival/combat modules disabled");
+            st.set_toast("Panic: all modules disabled");
         }
         FocusId::TabAutomation => {
             st.active_tab = NavTab::Automation;
@@ -2457,20 +2335,25 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.search_query.clear();
             save = false;
         }
-        FocusId::QuickFullbright | FocusId::FullbrightToggle => {
+        FocusId::FullbrightToggle | FocusId::QuickFullbright => {
             st.config.fullbright_enabled = !st.config.fullbright_enabled;
             st.lightmap_dirty = true;
         }
         FocusId::FullbrightModeMax => {
             st.config.fullbright_mode = FullbrightMode::Max;
+            st.config.fullbright_enabled = true;
             st.lightmap_dirty = true;
         }
         FocusId::FullbrightModeSoft => {
             st.config.fullbright_mode = FullbrightMode::Soft;
+            st.config.fullbright_enabled = true;
             st.lightmap_dirty = true;
         }
         FocusId::XrayTerrainToggle => {
             st.config.xray_terrain = !st.config.xray_terrain;
+        }
+        FocusId::XrayEntitiesToggle => {
+            st.config.xray_entities = !st.config.xray_entities;
         }
         FocusId::XrayOresToggle => {
             st.config.xray_ores = !st.config.xray_ores;
@@ -2480,9 +2363,6 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
                 OrePreset::Valuable => OrePreset::All,
                 OrePreset::All => OrePreset::Valuable,
             };
-        }
-        FocusId::XrayEntitiesToggle => {
-            st.config.xray_entities = !st.config.xray_entities;
         }
         FocusId::EspToggle => {
             st.config.esp_enabled = !st.config.esp_enabled;
@@ -2630,9 +2510,9 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         }
         FocusId::PerfProfileCycle => {
             st.config.perf_profile = match st.config.perf_profile {
-                crate::config::PerfProfile::Full => crate::config::PerfProfile::Balanced,
-                crate::config::PerfProfile::Balanced => crate::config::PerfProfile::Lite,
-                crate::config::PerfProfile::Lite => crate::config::PerfProfile::Full,
+                PerfProfile::Full => PerfProfile::Balanced,
+                PerfProfile::Balanced => PerfProfile::Lite,
+                PerfProfile::Lite => PerfProfile::Full,
             };
         }
         FocusId::SystemResetAll => {
@@ -2658,7 +2538,6 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             save = false;
         }
     }
-
     if save {
         let _ = st.config.save();
     }

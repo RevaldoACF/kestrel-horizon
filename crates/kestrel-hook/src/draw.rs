@@ -46,22 +46,22 @@ impl Color {
 /// - Warning Semantic (Cinnabar): #E05A47 (4.66:1 vs #171C23)
 pub mod palette {
     use super::Color;
-    pub const CANVAS: Color = Color::hex(0x0F1216, 0.94);
-    pub const CANVAS_SOLID: Color = Color::hex(0x0F1216, 1.0);
-    pub const SURFACE: Color = Color::hex(0x171C23, 0.96);
-    pub const SURFACE_HOVER: Color = Color::hex(0x1F2630, 0.98);
-    pub const SURFACE_PRESSED: Color = Color::hex(0x262F3B, 1.0);
-    pub const HUD_BG: Color = Color::hex(0x0F1216, 0.80);
-    pub const BORDER: Color = Color::hex(0x637288, 0.55);
-    pub const BORDER_STRONG: Color = Color::hex(0x637288, 1.0);
+    pub const CANVAS: Color = Color::hex(0x11141A, 0.93);
+    pub const CANVAS_SOLID: Color = Color::hex(0x11141A, 1.0);
+    pub const SURFACE: Color = Color::hex(0x171C24, 0.92);
+    pub const SURFACE_HOVER: Color = Color::hex(0x1F2530, 0.96);
+    pub const SURFACE_PRESSED: Color = Color::hex(0x262E3B, 1.0);
+    pub const HUD_BG: Color = Color::hex(0x11141A, 0.78);
+    pub const BORDER: Color = Color::hex(0x2B3342, 0.85);
+    pub const BORDER_STRONG: Color = Color::hex(0x475368, 1.0);
     pub const TEXT_PRIMARY: Color = Color::hex(0xF2F4F8, 1.0);
-    pub const TEXT_SECONDARY: Color = Color::hex(0xA8B3C4, 1.0);
+    pub const TEXT_SECONDARY: Color = Color::hex(0x9AA5B8, 1.0);
     pub const ACCENT: Color = Color::hex(0xE5A93B, 1.0);
     pub const ACCENT_SOFT: Color = Color::hex(0xE5A93B, 0.16);
     pub const SUCCESS: Color = Color::hex(0x2EC27E, 1.0);
     pub const SUCCESS_SOFT: Color = Color::hex(0x2EC27E, 0.16);
     pub const DANGER: Color = Color::hex(0xE05A47, 1.0);
-    pub const SHADOW: Color = Color::hex(0x05070A, 0.55);
+    pub const SHADOW: Color = Color::hex(0x04060A, 0.50);
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -57,11 +57,12 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     let sh = st.screen_size[1].max(1) as f32;
     let editing = st.hud_edit_mode;
 
+    render_intro(st, dl, atlas, sw, sh);
+
     // Show HUD only inside an active world (or during HUD layout editing)
     if !st.game.in_world && !editing {
         return;
     }
-
     // 3D Ore X-Ray ESP boxes (when inside world)
     let (ore_lbl, ore_max, chest_lbl, chest_max) = match st.config.perf_profile {
         crate::config::PerfProfile::Full => (32.0, 48, 36.0, 48),
@@ -1245,4 +1246,81 @@ fn draw_entity_esp_and_tracers(
             }
         }
     }
+}
+
+fn render_intro(st: &AppState, dl: &mut DrawList, atlas: &FontAtlas, sw: f32, _sh: f32) {
+    let elapsed = st.session_start.elapsed().as_secs_f32();
+    if elapsed >= 2.9 {
+        return;
+    }
+    let alpha = if elapsed < 0.35 {
+        let p = (elapsed / 0.35).clamp(0.0, 1.0);
+        1.0 - (1.0 - p).powi(3)
+    } else if elapsed > 2.35 {
+        let p = ((2.9 - elapsed) / 0.55).clamp(0.0, 1.0);
+        p * p
+    } else {
+        1.0
+    };
+    if alpha <= 0.01 {
+        return;
+    }
+
+    let slide = if elapsed < 0.35 {
+        let p = (elapsed / 0.35).clamp(0.0, 1.0);
+        (1.0 - (1.0 - p).powi(3)) * 12.0 - 12.0
+    } else if elapsed > 2.35 {
+        let p = ((elapsed - 2.35) / 0.55).clamp(0.0, 1.0);
+        -6.0 * p
+    } else {
+        0.0
+    };
+
+    let w = 264.0;
+    let h = 54.0;
+    let x = ((sw - w) * 0.5).round();
+    let y = (26.0 + slide).round();
+    let box_r = Rect::new(x, y, w, h);
+
+    dl.shadow(box_r, 12.0, 14.0, palette::SHADOW.with_alpha(alpha));
+    dl.rect_border(
+        box_r,
+        12.0,
+        palette::CANVAS.with_alpha(alpha),
+        1.0,
+        palette::BORDER.with_alpha(alpha),
+    );
+
+    dl.kestrel_crest(
+        x + 16.0,
+        y + 15.0,
+        22.0,
+        palette::ACCENT.with_alpha(alpha),
+        palette::TEXT_PRIMARY.with_alpha(alpha),
+    );
+    dl.text(
+        atlas,
+        FontKind::UiHeading,
+        x + 48.0,
+        y + 9.0,
+        "KESTREL",
+        palette::TEXT_PRIMARY.with_alpha(alpha),
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        x + 48.0,
+        y + 29.0,
+        "Press ~ or ` to open menu",
+        palette::TEXT_SECONDARY.with_alpha(alpha),
+    );
+
+    // Subtle progress sweep along bottom edge during intro
+    let bar_p = (elapsed / 2.35).clamp(0.0, 1.0);
+    let bar_w = (w - 28.0) * (1.0 - bar_p * 0.85);
+    dl.rect(
+        Rect::new(x + 14.0, y + h - 3.0, bar_w.max(0.0), 1.5),
+        0.75,
+        palette::ACCENT.with_alpha(0.8 * alpha),
+    );
 }

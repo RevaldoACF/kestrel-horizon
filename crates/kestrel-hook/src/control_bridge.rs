@@ -442,6 +442,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     let mut auto_mine_held = false;
     let mut was_mining = false;
     let mut last_haste_at = Instant::now() - Duration::from_secs(10);
+    let mut speed_mine_applied = false;
     let mut last_haste_amp: u32 = u32::MAX;
     let mut last_tool_switch = Instant::now() - Duration::from_secs(5);
     let mut conn_misses: u32 = 0;
@@ -933,15 +934,32 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         // 8. AutoMine & SpeedMine
         if cfg.speed_mine && playing_now {
             let amp = cfg.speed_mine_power.saturating_sub(1).min(4);
-            if last_haste_at.elapsed() >= Duration::from_secs(2) || last_haste_amp != amp {
+            if !speed_mine_applied || last_haste_at.elapsed() >= Duration::from_millis(1200) || last_haste_amp != amp {
                 last_haste_at = Instant::now();
                 last_haste_amp = amp;
-                if send_line(reader, writer, &format!("effect haste 4 {amp}")).is_none() {
+                speed_mine_applied = true;
+                if send_line(reader, writer, &format!("effect haste 2 {amp}")).is_none() {
                     conn = None;
                     continue;
                 }
             }
-        } else {
+        } else if speed_mine_applied && !cfg.speed_mine && live_snapshot.in_world {
+            let saved: Vec<(String, i32, i32)> = live_snapshot
+                .effects
+                .iter()
+                .filter(|(id, secs, _)| !id.ends_with("haste") && *secs > 0)
+                .map(|(id, secs, amp)| (id.strip_prefix("minecraft:").unwrap_or(id).to_string(), *secs, *amp))
+                .collect();
+            if send_line(reader, writer, "effect clear").is_none() {
+                conn = None;
+                continue;
+            }
+            for (id, secs, amp) in saved {
+                let _ = send_line(reader, writer, &format!("effect {id} {secs} {amp}"));
+            }
+            speed_mine_applied = false;
+            last_haste_amp = u32::MAX;
+        } else if !cfg.speed_mine {
             last_haste_amp = u32::MAX;
         }
 

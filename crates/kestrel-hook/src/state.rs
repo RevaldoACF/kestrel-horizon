@@ -149,6 +149,8 @@ pub struct AppState {
     pub pending_chars: Vec<char>,
     pub pending_keys: Vec<UiKey>,
     pub active_slider: Option<FocusId>,
+    pub menu_pos: Option<[f32; 2]>,
+    pub dragging_menu: Option<[f32; 2]>,
     pub dragging_widget: Option<(DragWidget, [f32; 2])>,
 
     // Telemetry from input hook (live even when menu is closed)
@@ -215,6 +217,8 @@ impl AppState {
             active_slider: None,
             dragging_widget: None,
 
+            menu_pos: None,
+            dragging_menu: None,
             key_w: false,
             key_a: false,
             key_s: false,
@@ -283,15 +287,16 @@ impl AppState {
             };
         }
 
-        // Smooth UI transition (120ms)
+        // Smooth open/close progress (175ms open, 140ms close)
         let target = if self.menu_open { 1.0 } else { 0.0 };
-        let speed = (dt / 0.12).min(1.0);
-        self.menu_anim += (target - self.menu_anim) * speed;
-        if (self.menu_anim - target).abs() < 0.01 {
-            self.menu_anim = target;
+        let dur = if self.menu_open { 0.175 } else { 0.14 };
+        let step = (dt / dur).min(1.0);
+        if self.menu_anim < target {
+            self.menu_anim = (self.menu_anim + step).min(target);
+        } else if self.menu_anim > target {
+            self.menu_anim = (self.menu_anim - step).max(target);
         }
     }
-
     pub fn cps(&mut self) -> (usize, usize) {
         let now = Instant::now();
         while self
