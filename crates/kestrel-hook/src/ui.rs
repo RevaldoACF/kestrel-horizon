@@ -656,7 +656,7 @@ fn render_survival_tab(
         &format!("{} blocks", st.config.xray_radius),
         st.config.xray_radius as f32,
         12.0,
-        36.0,
+        48.0,
         4.0,
         FocusId::XrayRadiusSlider,
         focusables,
@@ -1590,7 +1590,40 @@ fn render_system_tab(
         focusables,
     );
 
-    y + 64.0
+    y += 78.0;
+
+    let perf = Rect::new(x, y, w, 92.0);
+    dl.rect_border(perf, 10.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(
+        atlas,
+        FontKind::UiSemi,
+        perf.x + 16.0,
+        perf.y + 12.0,
+        "X-Ray & ESP Performance",
+        palette::TEXT_PRIMARY,
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        perf.x + 16.0,
+        perf.y + 34.0,
+        "Choose Full (original density & range), Balanced, or Lite Boost for low-end PCs.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_cycle_row(
+        st,
+        dl,
+        atlas,
+        Rect::new(perf.x + 16.0, perf.y + 56.0, w - 32.0, 26.0),
+        "Scan & Render Mode",
+        st.config.perf_profile.label(),
+        FocusId::PerfProfileCycle,
+        focusables,
+    );
+
+    y + 92.0
+
+
 }
 
 fn render_search_results(
@@ -2594,6 +2627,13 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
                 Err(e) => st.set_toast(format!("Save error: {e}")),
             }
             save = false;
+        }
+        FocusId::PerfProfileCycle => {
+            st.config.perf_profile = match st.config.perf_profile {
+                crate::config::PerfProfile::Full => crate::config::PerfProfile::Balanced,
+                crate::config::PerfProfile::Balanced => crate::config::PerfProfile::Lite,
+                crate::config::PerfProfile::Lite => crate::config::PerfProfile::Full,
+            };
         }
         FocusId::SystemResetAll => {
             st.config = KestrelConfig::default();

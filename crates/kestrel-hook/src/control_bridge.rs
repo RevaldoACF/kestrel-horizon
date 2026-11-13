@@ -579,10 +579,12 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             || cfg.esp_enabled
             || cfg.tracers_enabled
             || cfg.aim_assist;
-        let ent_interval = if cfg.aim_assist {
-            Duration::from_millis(105)
-        } else {
-            Duration::from_millis(220)
+        let ent_interval = match (cfg.aim_assist, cfg.perf_profile) {
+            (true, crate::config::PerfProfile::Full) => Duration::from_millis(85),
+            (true, _) => Duration::from_millis(105),
+            (false, crate::config::PerfProfile::Full) => Duration::from_millis(160),
+            (false, crate::config::PerfProfile::Balanced) => Duration::from_millis(200),
+            (false, crate::config::PerfProfile::Lite) => Duration::from_millis(260),
         };
         if live_snapshot.in_world && need_entities && last_ent.elapsed() >= ent_interval {
             last_ent = Instant::now();
@@ -605,14 +607,19 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         }
 
         if live_snapshot.in_world && cfg.xray_ores {
-            let moved_far = last_ore_scan_pos
-                .is_none_or(|p| dist3(p, live_snapshot.eye) >= 2.5);
-            let need_refresh = moved_far || last_ore_full_at.elapsed() >= Duration::from_millis(2500);
-            let interval = if live_snapshot.ore_markers.is_empty() { 150 } else { 260 };
+            let (move_gate, full_ms, base_ms, max_rad, per_type, max_total) = match cfg.perf_profile {
+                crate::config::PerfProfile::Full => (false, 0u64, 140u64, 48i32, 16usize, 48usize),
+                crate::config::PerfProfile::Balanced => (false, 0u64, 210u64, 40i32, 14usize, 32usize),
+                crate::config::PerfProfile::Lite => (true, 2500u64, 260u64, 36i32, 12usize, 20usize),
+            };
+            let moved_far = !move_gate
+                || last_ore_scan_pos.is_none_or(|p| dist3(p, live_snapshot.eye) >= 2.5);
+            let need_refresh = moved_far || last_ore_full_at.elapsed() >= Duration::from_millis(full_ms);
+            let interval = if live_snapshot.ore_markers.is_empty() { 130 } else { base_ms };
             if need_refresh && last_ores.elapsed() >= Duration::from_millis(interval) {
                 last_ores = Instant::now();
                 let targets = ore_targets_for(&live_snapshot.dimension, cfg.xray_ore_preset);
-                let rad = cfg.xray_radius.clamp(12, 36);
+                let rad = cfg.xray_radius.clamp(12, max_rad);
                 let mut lost_conn = false;
                 if !targets.is_empty() {
                     let (block_id, kind) = targets[ore_scan_idx % targets.len()];
@@ -624,7 +631,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                     if let Some(v) = send_line(reader, writer, &format!("find-block {block_id} {rad}")) {
                         let mut list = Vec::new();
                         if let Some(arr) = v.get("nearest").and_then(|x| x.as_array()) {
-                            for item in arr.iter().take(12) {
+                            for item in arr.iter().take(per_type) {
                                 if let Some(p) = item.get("pos").and_then(|x| x.as_array())
                                     && p.len() >= 3
                                 {
@@ -658,7 +665,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                     .filter(|m| m.distance <= max_d)
                     .collect();
                 merged.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-                merged.truncate(24);
+                merged.truncate(max_total);
                 live_snapshot.ore_markers = merged;
             }
         } else if !live_snapshot.ore_markers.is_empty() {
@@ -668,13 +675,17 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         }
 
         if live_snapshot.in_world && cfg.esp_enabled && cfg.esp_chests {
-            let moved_far = last_chest_scan_pos
-                .is_none_or(|p| dist3(p, live_snapshot.eye) >= 3.0);
-            let need_refresh = moved_far || last_chest_full_at.elapsed() >= Duration::from_millis(3000);
-            if need_refresh && last_chests.elapsed() >= Duration::from_millis(340) {
+            let (move_gate, full_ms, base_ms, rad, per_type, max_total) = match cfg.perf_profile {
+                crate::config::PerfProfile::Full => (false, 0u64, 180u64, 34i32, 16usize, 48usize),
+                crate::config::PerfProfile::Balanced => (false, 0u64, 260u64, 30i32, 12usize, 32usize),
+                crate::config::PerfProfile::Lite => (true, 3000u64, 340u64, 28i32, 10usize, 16usize),
+            };
+            let moved_far = !move_gate
+                || last_chest_scan_pos.is_none_or(|p| dist3(p, live_snapshot.eye) >= 3.0);
+            let need_refresh = moved_far || last_chest_full_at.elapsed() >= Duration::from_millis(full_ms);
+            if need_refresh && last_chests.elapsed() >= Duration::from_millis(base_ms) {
                 last_chests = Instant::now();
                 let targets = storage_targets();
-                let rad = 28;
                 let (block_id, kind) = targets[chest_scan_idx % targets.len()];
                 chest_scan_idx = chest_scan_idx.wrapping_add(1);
                 if chest_scan_idx.is_multiple_of(targets.len()) {
@@ -684,7 +695,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                 if let Some(v) = send_line(reader, writer, &format!("find-block {block_id} {rad}")) {
                     let mut list = Vec::new();
                     if let Some(arr) = v.get("nearest").and_then(|x| x.as_array()) {
-                        for item in arr.iter().take(10) {
+                        for item in arr.iter().take(per_type) {
                             if let Some(p) = item.get("pos").and_then(|x| x.as_array())
                                 && p.len() >= 3
                             {
@@ -706,13 +717,14 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                     conn = None;
                     continue;
                 }
+                let max_d = f64::from(rad) + 8.0;
                 let mut merged: Vec<OreMarker> = chest_cache
                     .values()
                     .flat_map(|v| v.iter().copied())
-                    .filter(|m| m.distance <= 34.0)
+                    .filter(|m| m.distance <= max_d)
                     .collect();
                 merged.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-                merged.truncate(16);
+                merged.truncate(max_total);
                 live_snapshot.chest_markers = merged;
             }
         } else if !live_snapshot.chest_markers.is_empty() {

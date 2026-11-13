@@ -63,11 +63,16 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     }
 
     // 3D Ore X-Ray ESP boxes (when inside world)
+    let (ore_lbl, ore_max, chest_lbl, chest_max) = match st.config.perf_profile {
+        crate::config::PerfProfile::Full => (32.0, 48, 36.0, 48),
+        crate::config::PerfProfile::Balanced => (28.0, 32, 32.0, 32),
+        crate::config::PerfProfile::Lite => (24.0, 20, 28.0, 16),
+    };
     if st.config.xray_ores && st.game.in_world {
-        draw_block_markers(st, dl, atlas, sw, sh, &st.game.ore_markers, 24.0, 24);
+        draw_block_markers(st, dl, atlas, sw, sh, &st.game.ore_markers, ore_lbl, ore_max);
     }
     if st.config.esp_enabled && st.config.esp_chests && st.game.in_world {
-        draw_block_markers(st, dl, atlas, sw, sh, &st.game.chest_markers, 28.0, 16);
+        draw_block_markers(st, dl, atlas, sw, sh, &st.game.chest_markers, chest_lbl, chest_max);
     }
     if (st.config.esp_enabled || st.config.tracers_enabled) && st.game.in_world {
         draw_entity_esp_and_tracers(st, dl, atlas, sw, sh);
@@ -1115,10 +1120,15 @@ fn draw_entity_esp_and_tracers(
     ];
     let origin = [sw * 0.5, sh * 0.5];
     let mut tag = String::with_capacity(48);
+    let (max_ent, ent_lbl_dist) = match st.config.perf_profile {
+        crate::config::PerfProfile::Full => (48usize, 40.0f64),
+        crate::config::PerfProfile::Balanced => (32usize, 34.0f64),
+        crate::config::PerfProfile::Lite => (24usize, 30.0f64),
+    };
     let mut drawn = 0usize;
 
     for e in &st.game.nearby_entities {
-        if drawn >= 24 {
+        if drawn >= max_ent {
             break;
         }
         let is_player = e.label == "minecraft:player";
@@ -1219,7 +1229,7 @@ fn draw_entity_esp_and_tracers(
             );
 
             drawn += 1;
-            if e.distance <= 30.0 {
+            if e.distance <= ent_lbl_dist {
                 tag.clear();
                 let clean = e.label.strip_prefix("minecraft:").unwrap_or(&e.label);
                 if let Some(hp) = e.health {

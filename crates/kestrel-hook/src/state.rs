@@ -125,6 +125,7 @@ pub enum FocusId {
     // System controls
     SystemSaveConfig,
     SystemResetAll,
+    PerfProfileCycle,
 }
 
 pub struct AppState {

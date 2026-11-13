@@ -91,6 +91,29 @@ impl CrosshairStyle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PerfProfile {
+    Full,
+    Balanced,
+    Lite,
+}
+
+impl Default for PerfProfile {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
+impl PerfProfile {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Full => "Full (Original)",
+            Self::Balanced => "Balanced",
+            Self::Lite => "Lite Boost",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HudWidget {
     pub enabled: bool,
@@ -179,6 +202,7 @@ pub struct KestrelConfig {
     pub speed_mine: bool,
     pub speed_mine_power: u32,
     pub auto_tool: bool,
+    pub perf_profile: PerfProfile,
 
     pub waypoints: Vec<Waypoint>,
 }
@@ -193,7 +217,7 @@ impl Default for KestrelConfig {
             xray_key: XrayKey::X,
             xray_ores: false,
             xray_ore_preset: OrePreset::Valuable,
-            xray_radius: 20,
+            xray_radius: 28,
             esp_enabled: false,
             tracers_enabled: false,
             esp_players: true,
@@ -276,6 +300,7 @@ impl Default for KestrelConfig {
             speed_mine: false,
             speed_mine_power: 2,
             auto_tool: false,
+            perf_profile: PerfProfile::Full,
 
             waypoints: Vec::new(),
         }
