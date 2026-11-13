@@ -161,23 +161,23 @@ impl Default for KestrelConfig {
             },
             hud_vitals: HudWidget {
                 enabled: true,
-                x: 0.805,
+                x: 0.780,
                 y: 0.024,
             },
             hud_compass: HudWidget {
                 enabled: true,
-                x: 0.340,
+                x: 0.350,
                 y: 0.020,
             },
             hud_clock: HudWidget {
                 enabled: false,
-                x: 0.805,
-                y: 0.175,
+                x: 0.780,
+                y: 0.165,
             },
             hud_radar: HudWidget {
                 enabled: true,
-                x: 0.855,
-                y: 0.220,
+                x: 0.850,
+                y: 0.215,
             },
 
             auto_sprint: false,

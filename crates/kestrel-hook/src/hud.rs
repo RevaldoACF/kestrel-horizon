@@ -45,8 +45,8 @@ fn format_mc_time(time_of_day: i64) -> String {
 }
 
 fn widget_rect(w_norm: &HudWidget, box_w: f32, box_h: f32, sw: f32, sh: f32) -> Rect {
-    let x = (w_norm.x * sw).clamp(4.0, (sw - box_w - 4.0).max(4.0));
-    let y = (w_norm.y * sh).clamp(4.0, (sh - box_h - 4.0).max(4.0));
+    let x = (w_norm.x * sw).clamp(6.0, (sw - box_w - 6.0).max(6.0));
+    let y = (w_norm.y * sh).clamp(6.0, (sh - box_h - 6.0).max(6.0));
     Rect::new(x, y, box_w, box_h)
 }
 
@@ -55,12 +55,16 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     let sh = st.screen_size[1].max(1) as f32;
     let editing = st.hud_edit_mode;
 
-    // Crosshair+ (only when in world/playing or previewing in edit mode, and menu is closed)
-    if st.config.crosshair_enabled && !st.menu_open && (st.game.in_world || editing || !st.game.socket_connected) {
+    // Show HUD only inside an active world (or during HUD layout editing), just like Lunar/Wurst
+    if !st.game.in_world && !editing {
+        return;
+    }
+
+    // Crosshair+ (only while playing with menu closed)
+    if st.config.crosshair_enabled && !st.menu_open && st.game.screen == "playing" {
         draw_crosshair(st, dl, sw * 0.5, sh * 0.5);
     }
 
-    // Track drag interactions during HUD Edit Mode
     let mut active_rects: Vec<(DragWidget, &'static str, Rect)> = Vec::new();
 
     if st.config.hud_coords.enabled || editing {
@@ -493,7 +497,7 @@ fn draw_vitals_widget(
     sh: f32,
     editing: bool,
 ) -> Rect {
-    let w = 232.0;
+    let w = 212.0;
     let eff_count = st.game.effects.len().min(3);
     let h = 88.0 + if eff_count > 0 { 20.0 } else { 0.0 };
     let r = widget_rect(&st.config.hud_vitals, w, h, sw, sh);
@@ -647,7 +651,7 @@ fn draw_compass_widget(
     sh: f32,
     editing: bool,
 ) -> Rect {
-    let w = 380.0;
+    let w = 340.0;
     let h = 42.0;
     let r = widget_rect(&st.config.hud_compass, w, h, sw, sh);
     let alpha = if st.config.hud_compass.enabled {
@@ -759,7 +763,7 @@ fn draw_clock_widget(
     sh: f32,
     _editing: bool,
 ) -> Rect {
-    let w = 232.0;
+    let w = 212.0;
     let h = 44.0;
     let r = widget_rect(&st.config.hud_clock, w, h, sw, sh);
     let alpha = if st.config.hud_clock.enabled { 1.0 } else { 0.45 };
@@ -818,7 +822,7 @@ fn draw_radar_widget(
     sh: f32,
     editing: bool,
 ) -> Rect {
-    let size = 144.0;
+    let size = 132.0;
     let r = widget_rect(&st.config.hud_radar, size, size + 22.0, sw, sh);
     let alpha = if st.config.hud_radar.enabled { 1.0 } else { 0.45 };
 

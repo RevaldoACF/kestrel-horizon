@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -14,59 +15,128 @@ fn find_libkestrel() -> Result<PathBuf, String> {
     {
         let sibling = dir.join("libkestrel.so");
         if sibling.exists() {
-            return Ok(sibling);
+            return Ok(fs::canonicalize(&sibling).unwrap_or(sibling));
         }
     }
     let cwd = env::current_dir().map_err(|e| e.to_string())?;
     for rel in [
+        "dist/libkestrel.so",
         "target/release/libkestrel.so",
         "target/debug/libkestrel.so",
         "libkestrel.so",
     ] {
         let p = cwd.join(rel);
         if p.exists() {
-            return Ok(p);
+            return Ok(fs::canonicalize(&p).unwrap_or(p));
         }
     }
-    Err("libkestrel.so not found; build with `cargo build --release` first".to_string())
+    Err("libkestrel.so not found next to kestrel-inject or in dist/".to_string())
 }
 
-fn find_horizon_client() -> Result<(PathBuf, PathBuf), String> {
+fn find_launcher_exe() -> Option<PathBuf> {
+    let home = home_dir();
+    for cand in [
+        home.join(".local/share/horizon-offline-launcher/horizon-offline-launcher"),
+        home.join(".local/bin/horizon-offline-launcher"),
+        home.join(".local/bin/horizon-launcher"),
+    ] {
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+    if let Ok(path_env) = env::var("PATH") {
+        for dir in path_env.split(':') {
+            for name in ["horizon-launcher", "horizon-offline-launcher"] {
+                let p = Path::new(dir).join(name);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+struct HorizonPaths {
+    bin: PathBuf,
+    resources: PathBuf,
+    game_dir: PathBuf,
+}
+
+fn find_horizon_paths() -> Result<HorizonPaths, String> {
     let home = home_dir();
     let launcher_dir = home.join(".local/share/horizon-launcher");
     let game_dir = home.join(".local/share/horizon");
 
+    let mut candidate_versions: Vec<String> = Vec::new();
     if let Ok(raw) = fs::read_to_string(launcher_dir.join("instances.json"))
         && let Ok(v) = serde_json::from_str::<Value>(&raw)
         && let Some(ver) = v["instances"]["horizon"]["version"].as_str()
     {
-        let bin = launcher_dir.join("versions").join(ver).join("horizon-client");
-        if bin.exists() {
-            return Ok((bin, game_dir));
-        }
+        candidate_versions.push(ver.to_string());
     }
-
     if let Ok(raw) = fs::read_to_string(launcher_dir.join("settings.json"))
         && let Ok(v) = serde_json::from_str::<Value>(&raw)
         && let Some(ver) = v["selected"].as_str()
     {
-        let bin = launcher_dir.join("versions").join(ver).join("horizon-client");
-        if bin.exists() {
-            return Ok((bin, game_dir));
-        }
+        candidate_versions.push(ver.to_string());
     }
-
-    let versions_dir = launcher_dir.join("versions");
-    if let Ok(entries) = fs::read_dir(&versions_dir) {
+    if let Ok(entries) = fs::read_dir(launcher_dir.join("versions")) {
         for entry in entries.flatten() {
-            let bin = entry.path().join("horizon-client");
-            if bin.exists() {
-                return Ok((bin, game_dir));
+            if let Some(name) = entry.file_name().to_str() {
+                candidate_versions.push(name.to_string());
             }
         }
     }
 
-    Err("Could not locate horizon-client under ~/.local/share/horizon-launcher/versions".to_string())
+    for ver in candidate_versions {
+        let ver_dir = launcher_dir.join("versions").join(&ver);
+        let bin = ver_dir.join("horizon-client");
+        if !bin.exists() {
+            continue;
+        }
+        // Locate prepared 26.3 resources folder inside the version directory
+        let hc_dir = ver_dir.join(".local/horizon-client");
+        if let Ok(subs) = fs::read_dir(&hc_dir) {
+            for sub in subs.flatten() {
+                let res_dir = sub.path();
+                if res_dir.join("horizon-resources.json").exists() || res_dir.is_dir() {
+                    return Ok(HorizonPaths {
+                        bin,
+                        resources: res_dir,
+                        game_dir,
+                    });
+                }
+            }
+        }
+        let fallback_res = hc_dir.join("26.3");
+        if fallback_res.exists() {
+            return Ok(HorizonPaths {
+                bin,
+                resources: fallback_res,
+                game_dir,
+            });
+        }
+    }
+
+    Err("Could not locate prepared Horizon resources under ~/.local/share/horizon-launcher/versions".to_string())
+}
+
+fn ensure_agent_control(game_dir: &Path) {
+    let extras_path = game_dir.join("horizon-extras.txt");
+    if let Ok(text) = fs::read_to_string(&extras_path) {
+        if text.contains("agentControl:false") {
+            let updated = text.replace("agentControl:false", "agentControl:true");
+            let _ = fs::write(&extras_path, updated);
+        } else if !text.contains("agentControl:") {
+            let mut updated = text;
+            if !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str("agentControl:true\n");
+            let _ = fs::write(&extras_path, updated);
+        }
+    }
 }
 
 fn find_running_horizon_pids() -> Vec<i32> {
@@ -90,7 +160,8 @@ fn find_running_horizon_pids() -> Vec<i32> {
 
 fn cmd_play(args: &[String]) -> Result<(), String> {
     let lib = find_libkestrel()?;
-    let (mut bin, game_dir) = find_horizon_client()?;
+    let mut hp = find_horizon_paths()?;
+    let mut foreground = false;
     let mut extra_args: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -98,9 +169,10 @@ fn cmd_play(args: &[String]) -> Result<(), String> {
             "--bin" => {
                 i += 1;
                 if i < args.len() {
-                    bin = PathBuf::from(&args[i]);
+                    hp.bin = PathBuf::from(&args[i]);
                 }
             }
+            "--fg" => foreground = true,
             "--" => {
                 extra_args.extend(args[i + 1..].iter().cloned());
                 break;
@@ -110,6 +182,9 @@ fn cmd_play(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
+    let _ = fs::create_dir_all(hp.game_dir.join("logs"));
+    ensure_agent_control(&hp.game_dir);
+
     let existing_preload = env::var("LD_PRELOAD").unwrap_or_default();
     let preload = if existing_preload.is_empty() {
         lib.display().to_string()
@@ -117,50 +192,116 @@ fn cmd_play(args: &[String]) -> Result<(), String> {
         format!("{}:{}", lib.display(), existing_preload)
     };
 
-    println!("[kestrel] Injecting {} into {}", lib.display(), bin.display());
-    println!("[kestrel] Game dir: {}", game_dir.display());
-    println!("[kestrel] Press [`] or [~] inside Horizon to open the Kestrel Client menu.");
-
-    let status = Command::new(&bin)
+    let mut cmd = Command::new(&hp.bin);
+    cmd.arg("--resources")
+        .arg(&hp.resources)
+        .arg("--control")
         .args(&extra_args)
-        .current_dir(&game_dir)
+        .current_dir(&hp.game_dir)
         .env("LD_PRELOAD", preload)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| format!("failed to start {}: {e}", bin.display()))?;
+        .env(
+            "PIPEWIRE_PROPS",
+            "{ application.name = \"Horizon\" media.role = \"Game\" }",
+        );
 
-    if !status.success() {
-        return Err(format!("horizon-client exited with {status}"));
+    if let Some(launcher) = find_launcher_exe() {
+        cmd.env("HORIZON_LAUNCHER_EXE", launcher);
     }
+
+    if foreground {
+        let status = cmd
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| format!("failed to start {}: {e}", hp.bin.display()))?;
+        if !status.success() {
+            return Err(format!("horizon-client exited with {status}"));
+        }
+        return Ok(());
+    }
+
+    // Spawn cleanly detached so no terminal window is required or left blocking
+    let log_path = hp.game_dir.join("logs/kestrel.log");
+    let log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+        .map_err(|e| format!("failed to open {}: {e}", log_path.display()))?;
+    let log_err = log_file.try_clone().map_err(|e| e.to_string())?;
+
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .map_err(|e| format!("failed to start {}: {e}", hp.bin.display()))?;
+
+    println!(
+        "[kestrel] Horizon started (pid {}) with {} injected.",
+        child.id(),
+        lib.display()
+    );
+    println!("[kestrel] Press [`] or [~] inside Minecraft to open the Kestrel menu.");
     Ok(())
 }
 
 fn cmd_install() -> Result<(), String> {
     let lib = find_libkestrel()?;
+    let hp = find_horizon_paths()?;
+    ensure_agent_control(&hp.game_dir);
+
+    let launcher = find_launcher_exe().ok_or_else(|| {
+        "horizon-launcher / horizon-offline-launcher not found; use `kestrel-inject play` or `kestrel-inject desktop`".to_string()
+    })?;
+
     let env_val = format!("LD_PRELOAD={}", lib.display());
-    let status = Command::new("horizon-launcher")
+    let status = Command::new(&launcher)
         .args(["instance", "launch", "horizon", "--env", &env_val])
         .status()
-        .map_err(|e| format!("failed to run horizon-launcher: {e}"))?;
+        .map_err(|e| format!("failed to run {}: {e}", launcher.display()))?;
     if !status.success() {
-        return Err("horizon-launcher instance launch returned non-zero status".to_string());
+        return Err(format!("{} returned non-zero status", launcher.display()));
     }
+    install_desktop_entry()?;
     println!("[kestrel] Installed LD_PRELOAD hook into Horizon Launcher instance 'horizon'.");
-    println!("[kestrel] Click Play in Horizon Launcher, then press [`] or [~] in-game.");
+    println!("[kestrel] You can now click Play in Horizon or launch 'Horizon (Kestrel Client)' from your app menu with zero terminal.");
+    Ok(())
+}
+
+fn install_desktop_entry() -> Result<(), String> {
+    let self_exe = env::current_exe().map_err(|e| e.to_string())?;
+    let self_exe = fs::canonicalize(&self_exe).unwrap_or(self_exe);
+    let apps_dir = home_dir().join(".local/share/applications");
+    fs::create_dir_all(&apps_dir).map_err(|e| e.to_string())?;
+    let desktop_path = apps_dir.join("horizon-kestrel.desktop");
+    let content = format!(
+        "[Desktop Entry]\nType=Application\nName=Horizon (Kestrel Client)\nGenericName=Minecraft Client\nComment=Launch Horizon with Kestrel Survival Client injected\nExec=\"{}\" play\nIcon=horizon\nTerminal=false\nCategories=Game;\nStartupWMClass=horizon\n",
+        self_exe.display()
+    );
+    fs::write(&desktop_path, content).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 fn cmd_uninstall() -> Result<(), String> {
-    let status = Command::new("horizon-launcher")
-        .args(["instance", "launch", "horizon", "--env", ""])
-        .status()
-        .map_err(|e| format!("failed to run horizon-launcher: {e}"))?;
-    if !status.success() {
-        return Err("horizon-launcher instance launch returned non-zero status".to_string());
+    if let Some(launcher) = find_launcher_exe() {
+        let _ = Command::new(&launcher)
+            .args(["instance", "launch", "horizon", "--env", ""])
+            .status();
     }
-    println!("[kestrel] Removed LD_PRELOAD hook from Horizon Launcher instance 'horizon'.");
+    let desktop_path = home_dir().join(".local/share/applications/horizon-kestrel.desktop");
+    if desktop_path.exists() {
+        let _ = fs::remove_file(&desktop_path);
+    }
+    println!("[kestrel] Removed Kestrel hook and desktop shortcut.");
     Ok(())
 }
 
@@ -169,12 +310,16 @@ fn cmd_status() {
         Ok(p) => println!("libkestrel.so : {}", p.display()),
         Err(e) => println!("libkestrel.so : MISSING ({e})"),
     }
-    match find_horizon_client() {
-        Ok((bin, dir)) => {
-            println!("horizon-client: {}", bin.display());
-            println!("game dir      : {}", dir.display());
+    match find_horizon_paths() {
+        Ok(hp) => {
+            println!("horizon-client: {}", hp.bin.display());
+            println!("resources dir : {}", hp.resources.display());
+            println!("game dir      : {}", hp.game_dir.display());
         }
         Err(e) => println!("horizon-client: NOT FOUND ({e})"),
+    }
+    if let Some(launcher) = find_launcher_exe() {
+        println!("launcher      : {}", launcher.display());
     }
     let pids = find_running_horizon_pids();
     if pids.is_empty() {
@@ -212,7 +357,7 @@ fn cmd_attach(pid_arg: Option<&String>) -> Result<(), String> {
             scope.trim()
         );
         eprintln!(
-            "[kestrel] Tip: for Vulkan/X11 hooks from frame 0, prefer `kestrel-inject play` or `kestrel-inject install`."
+            "[kestrel] Tip: use `kestrel-inject install` or `kestrel-inject play` so Horizon starts directly with Kestrel injected."
         );
     }
 
@@ -249,7 +394,6 @@ fn ptrace_inject_so(pid: i32, so_path: &Path) -> Result<(), String> {
             return Err("PTRACE_GETREGS failed".to_string());
         }
 
-        // Write .so path on stack below red zone and call dlopen(path, RTLD_NOW)
         let mut regs = saved_regs;
         let path_addr = (regs.rsp - 512) & !0xF;
         let ret_addr = path_addr - 8;
@@ -265,7 +409,6 @@ fn ptrace_inject_so(pid: i32, so_path: &Path) -> Result<(), String> {
                 word as *mut libc::c_void,
             );
         }
-        // Return address = 0 to trigger SIGSEGV cleanly back to ptrace tracer
         libc::ptrace(
             libc::PTRACE_POKEDATA,
             pid,
@@ -286,6 +429,7 @@ fn ptrace_inject_so(pid: i32, so_path: &Path) -> Result<(), String> {
         let mut after_regs: libc::user_regs_struct = std::mem::zeroed();
         libc::ptrace(libc::PTRACE_GETREGS, pid, 0, &mut after_regs);
         let handle = after_regs.rax;
+
         libc::ptrace(libc::PTRACE_SETREGS, pid, 0, &saved_regs);
         libc::ptrace(libc::PTRACE_DETACH, pid, 0, 0);
 
@@ -318,11 +462,12 @@ fn print_help() {
     println!("kestrel-inject - Horizon Survival Client Injector");
     println!();
     println!("Usage:");
-    println!("  kestrel-inject play [--bin PATH] [-- ARGS...]   Launch horizon-client with Kestrel injected");
-    println!("  kestrel-inject install                          Hook Kestrel into Horizon Launcher Play button");
-    println!("  kestrel-inject uninstall                        Remove Kestrel hook from Horizon Launcher");
-    println!("  kestrel-inject attach [PID]                     Inject .so into a running horizon-client PID");
-    println!("  kestrel-inject status                           Show binary, library, and socket status");
+    println!("  kestrel-inject play [--fg] [--bin PATH] [-- ARGS...]   Launch pure Horizon with Kestrel injected (detached)");
+    println!("  kestrel-inject install                                 Hook Kestrel into Horizon Launcher & app menu");
+    println!("  kestrel-inject uninstall                               Remove Kestrel hook and desktop shortcut");
+    println!("  kestrel-inject desktop                                 Create Horizon (Kestrel Client) desktop launcher");
+    println!("  kestrel-inject attach [PID]                            Inject .so into a running horizon-client PID");
+    println!("  kestrel-inject status                                  Show binary, library, resources, and socket status");
 }
 
 fn main() {
@@ -331,6 +476,9 @@ fn main() {
         Some("play") => cmd_play(&args[1..]),
         Some("install") => cmd_install(),
         Some("uninstall") => cmd_uninstall(),
+        Some("desktop") => install_desktop_entry().map(|()| {
+            println!("[kestrel] Created ~/.local/share/applications/horizon-kestrel.desktop");
+        }),
         Some("attach") => cmd_attach(args.get(1)),
         Some("status") => {
             cmd_status();

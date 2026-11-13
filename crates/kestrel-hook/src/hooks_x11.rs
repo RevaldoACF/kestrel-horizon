@@ -3,7 +3,7 @@ use crate::control_bridge::{send_cmd, ControlCmd};
 use crate::state::{UiKey, STATE};
 use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -107,15 +107,6 @@ type CLongPad = libc::c_long;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct XIModifierState {
-    pub base: c_int,
-    pub latched: c_int,
-    pub locked: c_int,
-    pub effective: c_int,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
 pub struct XIDeviceEvent {
     pub r#type: c_int,
     pub _pad0: c_int,
@@ -138,7 +129,6 @@ pub struct XIDeviceEvent {
     pub event_y: f64,
     pub flags: c_int,
     pub _pad2: c_int,
-    // followed by valuators/buttons/mods (mods at offset 168)
 }
 
 const KEY_PRESS: c_int = 2;
@@ -190,6 +180,7 @@ type FnXLookupString = unsafe extern "C" fn(
     *mut KeySym,
     *mut c_void,
 ) -> c_int;
+type FnXKeycodeToKeysym = unsafe extern "C" fn(*mut Display, c_uint, c_int) -> KeySym;
 type FnXUngrabPointer = unsafe extern "C" fn(*mut Display, Time) -> c_int;
 type FnXGrabPointer = unsafe extern "C" fn(
     *mut Display,
@@ -224,6 +215,7 @@ struct X11Fns {
     x_get_event_data: Option<FnXGetEventData>,
     x_free_event_data: Option<FnXFreeEventData>,
     x_lookup_string: Option<FnXLookupString>,
+    x_keycode_to_keysym: Option<FnXKeycodeToKeysym>,
     x_ungrab_pointer: Option<FnXUngrabPointer>,
     x_grab_pointer: Option<FnXGrabPointer>,
     x_define_cursor: Option<FnXDefineCursor>,
@@ -244,7 +236,8 @@ fn resolve_x11() -> &'static X11Fns {
         } else {
             libx11
         };
-        let libx11_xcb = libc::dlopen(c"libX11-xcb.so.1".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+        let libx11_xcb =
+            libc::dlopen(c"libX11-xcb.so.1".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
         let libxcb = libc::dlopen(c"libxcb.so.1".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
 
         macro_rules! sym {
@@ -270,6 +263,7 @@ fn resolve_x11() -> &'static X11Fns {
             x_get_event_data: sym!(libx11, c"XGetEventData", FnXGetEventData),
             x_free_event_data: sym!(libx11, c"XFreeEventData", FnXFreeEventData),
             x_lookup_string: sym!(libx11, c"XLookupString", FnXLookupString),
+            x_keycode_to_keysym: sym!(libx11, c"XKeycodeToKeysym", FnXKeycodeToKeysym),
             x_ungrab_pointer: sym!(libx11, c"XUngrabPointer", FnXUngrabPointer),
             x_grab_pointer: sym!(libx11, c"XGrabPointer", FnXGrabPointer),
             x_define_cursor: sym!(libx11, c"XDefineCursor", FnXDefineCursor),
@@ -290,9 +284,17 @@ static GAME_WANTS_GRAB: AtomicBool = AtomicBool::new(false);
 static GRAVE_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
 
+// Lock-free atomic state for zero-delay gameplay input!
+pub static UI_CAPTURING: AtomicBool = AtomicBool::new(false);
+pub static PASSIVE_KEYS_MASK: AtomicU8 = AtomicU8::new(0); // bit0=W,1=A,2=S,3=D,4=Space,5=LMB,6=RMB
+
+pub fn set_ui_capturing(capturing: bool) {
+    UI_CAPTURING.store(capturing, Ordering::Relaxed);
+}
+
+#[inline(always)]
 fn ui_capturing() -> bool {
-    let st = STATE.lock();
-    st.menu_open || st.hud_edit_mode
+    UI_CAPTURING.load(Ordering::Relaxed)
 }
 
 fn ensure_arrow_cursor(dpy: *mut Display) -> Cursor {
@@ -372,10 +374,6 @@ fn restore_cursor_for_game(dpy: *mut Display, win: Window) {
     }
 }
 
-fn is_grave_or_tilde(sym: KeySym, keycode: c_uint) -> bool {
-    sym == XK_GRAVE || sym == XK_ASCIITILDE || keycode == 49
-}
-
 fn toggle_menu(dpy: *mut Display, win: Window) {
     let (opened, should_restore) = {
         let mut st = STATE.lock();
@@ -383,11 +381,13 @@ fn toggle_menu(dpy: *mut Display, win: Window) {
             st.hud_edit_mode = false;
             st.dragging_widget = None;
             let _ = st.config.save();
+            UI_CAPTURING.store(false, Ordering::Relaxed);
             (false, true)
         } else {
             st.menu_open = !st.menu_open;
             st.active_slider = None;
             st.active_text_target = None;
+            UI_CAPTURING.store(st.menu_open, Ordering::Relaxed);
             (st.menu_open, !st.menu_open)
         }
     };
@@ -413,6 +413,7 @@ fn handle_key_in_ui(sym: KeySym, pressed: bool, text_buf: &str) {
                 st.hud_edit_mode = false;
                 st.dragging_widget = None;
                 let _ = st.config.save();
+                UI_CAPTURING.store(false, Ordering::Relaxed);
                 drop(st);
                 let dpy = LAST_DISPLAY.load(Ordering::Relaxed) as *mut Display;
                 let win = LAST_WINDOW.load(Ordering::Relaxed) as Window;
@@ -446,28 +447,65 @@ fn handle_key_in_ui(sym: KeySym, pressed: bool, text_buf: &str) {
     }
 }
 
-fn handle_key_passive(sym: KeySym, pressed: bool) {
+#[inline]
+fn set_mask_bit(bit: u8, on: bool) {
+    if on {
+        PASSIVE_KEYS_MASK.fetch_or(1 << bit, Ordering::Relaxed);
+    } else {
+        PASSIVE_KEYS_MASK.fetch_and(!(1 << bit), Ordering::Relaxed);
+    }
+}
+
+fn handle_key_passive_fast(dpy: *mut Display, keycode: c_uint, pressed: bool) {
+    let fns = resolve_x11();
+    let sym = if let Some(k2s) = fns.x_keycode_to_keysym {
+        unsafe { k2s(dpy, keycode, 0) }
+    } else {
+        0
+    };
+    let lower = if (0x41..=0x5A).contains(&sym) {
+        sym + 0x20
+    } else {
+        sym
+    };
+
+    // Zero-lock WASD + Space update!
+    match lower {
+        0x77 => {
+            set_mask_bit(0, pressed);
+            return;
+        }
+        0x61 => {
+            set_mask_bit(1, pressed);
+            return;
+        }
+        0x73 => {
+            set_mask_bit(2, pressed);
+            return;
+        }
+        0x64 => {
+            set_mask_bit(3, pressed);
+            return;
+        }
+        XK_SPACE => {
+            set_mask_bit(4, pressed);
+            return;
+        }
+        _ => {}
+    }
+
+    // Only check Zoom / X-Ray hotkeys when those specific keys are pressed/released
+    if !matches!(lower, 0x63 | 0x76 | 0x78 | 0x62) && sym != XK_ALT_L && sym != XK_ALT_R {
+        return;
+    }
+
     let mut zoom_change: Option<(bool, u32)> = None;
     {
         let mut st = STATE.lock();
-        let lower = if (0x41..=0x5A).contains(&sym) {
-            sym + 0x20
-        } else {
-            sym
-        };
-        match lower {
-            0x77 => st.key_w = pressed,     // 'w'
-            0x61 => st.key_a = pressed,     // 'a'
-            0x73 => st.key_s = pressed,     // 's'
-            0x64 => st.key_d = pressed,     // 'd'
-            XK_SPACE => st.key_space = pressed,
-            _ => {}
-        }
-
         if st.config.zoom_enabled {
             let match_zoom = match st.config.zoom_key {
-                ZoomKey::C => lower == 0x63, // 'c'
-                ZoomKey::V => lower == 0x76, // 'v'
+                ZoomKey::C => lower == 0x63,
+                ZoomKey::V => lower == 0x76,
                 ZoomKey::Alt => sym == XK_ALT_L || sym == XK_ALT_R,
             };
             if match_zoom && st.zoom_held != pressed {
@@ -477,8 +515,8 @@ fn handle_key_passive(sym: KeySym, pressed: bool) {
         }
 
         let match_xray = match st.config.xray_key {
-            XrayKey::X => lower == 0x78, // 'x'
-            XrayKey::B => lower == 0x62, // 'b'
+            XrayKey::X => lower == 0x78,
+            XrayKey::B => lower == 0x62,
             XrayKey::None => false,
         };
         if match_xray {
@@ -499,18 +537,31 @@ fn handle_key_passive(sym: KeySym, pressed: bool) {
 }
 
 fn handle_mouse_button_passive(detail: c_uint, pressed: bool) {
-    let mut st = STATE.lock();
-    let now = Instant::now();
-    if detail == 1 {
-        if pressed && !st.lmb_down {
-            st.lmb_times.push_back(now);
+    if detail != 1 && detail != 3 {
+        return;
+    }
+    set_mask_bit(if detail == 1 { 5 } else { 6 }, pressed);
+    if pressed {
+        let mut st = STATE.lock();
+        let now = Instant::now();
+        if detail == 1 {
+            if !st.lmb_down {
+                st.lmb_times.push_back(now);
+            }
+            st.lmb_down = true;
+        } else {
+            if !st.rmb_down {
+                st.rmb_times.push_back(now);
+            }
+            st.rmb_down = true;
         }
-        st.lmb_down = pressed;
-    } else if detail == 3 {
-        if pressed && !st.rmb_down {
-            st.rmb_times.push_back(now);
+    } else {
+        let mut st = STATE.lock();
+        if detail == 1 {
+            st.lmb_down = false;
+        } else {
+            st.rmb_down = false;
         }
-        st.rmb_down = pressed;
     }
 }
 
@@ -562,39 +613,26 @@ pub unsafe extern "C" fn hook_XCheckIfEvent(
 
         let ev = unsafe { &mut *event_return };
         let ev_type = unsafe { ev.r#type };
+        let capturing = ui_capturing();
+
+        // Fast pass-through for all non-menu motion/generic events when playing!
+        if !capturing && ev_type != KEY_PRESS && ev_type != KEY_RELEASE && ev_type != BUTTON_PRESS && ev_type != BUTTON_RELEASE {
+            return 1;
+        }
 
         if ev_type == KEY_PRESS || ev_type == KEY_RELEASE {
             let win = unsafe { ev.xkey.window };
             if win != 0 {
                 LAST_WINDOW.store(win as usize, Ordering::Relaxed);
             }
-
             let pressed = ev_type == KEY_PRESS;
             let keycode = unsafe { ev.xkey.keycode };
-            let mut sym: KeySym = 0;
-            let mut buf = [0i8; 32];
-            let mut text = String::new();
-            if let Some(lookup) = fns.x_lookup_string {
-                let len = unsafe {
-                    lookup(
-                        &mut ev.xkey,
-                        buf.as_mut_ptr(),
-                        buf.len() as c_int - 1,
-                        &mut sym,
-                        ptr::null_mut(),
-                    )
-                };
-                if len > 0 {
-                    let bytes = unsafe {
-                        std::slice::from_raw_parts(buf.as_ptr() as *const u8, len as usize)
-                    };
-                    if let Ok(s) = std::str::from_utf8(bytes) {
-                        text.push_str(s);
-                    }
-                }
-            }
 
-            if is_grave_or_tilde(sym, keycode) {
+            // Fast check for ` / ~ keycode (49) or keysym before full XLookupString
+            let quick_sym = fns
+                .x_keycode_to_keysym
+                .map_or(0, |f| unsafe { f(display, keycode, 0) });
+            if keycode == 49 || quick_sym == XK_GRAVE || quick_sym == XK_ASCIITILDE {
                 if pressed {
                     if !GRAVE_DOWN.swap(true, Ordering::Relaxed) {
                         toggle_menu(display, win);
@@ -602,14 +640,36 @@ pub unsafe extern "C" fn hook_XCheckIfEvent(
                 } else {
                     GRAVE_DOWN.store(false, Ordering::Relaxed);
                 }
-                continue; // Always consume ` / ~ so Minecraft doesn't treat it weirdly
+                continue;
             }
 
-            if ui_capturing() {
+            if capturing {
+                let mut sym: KeySym = 0;
+                let mut buf = [0i8; 32];
+                let mut text = String::new();
+                if let Some(lookup) = fns.x_lookup_string {
+                    let len = unsafe {
+                        lookup(
+                            &mut ev.xkey,
+                            buf.as_mut_ptr(),
+                            buf.len() as c_int - 1,
+                            &mut sym,
+                            ptr::null_mut(),
+                        )
+                    };
+                    if len > 0 {
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(buf.as_ptr() as *const u8, len as usize)
+                        };
+                        if let Ok(s) = std::str::from_utf8(bytes) {
+                            text.push_str(s);
+                        }
+                    }
+                }
                 handle_key_in_ui(sym, pressed, &text);
                 continue;
             } else {
-                handle_key_passive(sym, pressed);
+                handle_key_passive_fast(display, keycode, pressed);
                 return 1;
             }
         }
@@ -617,9 +677,9 @@ pub unsafe extern "C" fn hook_XCheckIfEvent(
         if ev_type == BUTTON_PRESS || ev_type == BUTTON_RELEASE {
             let pressed = ev_type == BUTTON_PRESS;
             let btn = unsafe { ev.xbutton.button };
-            let px = unsafe { ev.xbutton.x as f32 };
-            let py = unsafe { ev.xbutton.y as f32 };
-            if ui_capturing() {
+            if capturing {
+                let px = unsafe { ev.xbutton.x as f32 };
+                let py = unsafe { ev.xbutton.y as f32 };
                 handle_mouse_ui(btn as c_int, pressed, Some(px), Some(py));
                 continue;
             } else {
@@ -629,60 +689,53 @@ pub unsafe extern "C" fn hook_XCheckIfEvent(
         }
 
         if ev_type == MOTION_NOTIFY {
-            if ui_capturing() {
-                let px = unsafe { ev.xmotion.x as f32 };
-                let py = unsafe { ev.xmotion.y as f32 };
-                let mut st = STATE.lock();
-                st.cursor_pos = [px, py];
-                continue;
-            }
-            return 1;
+            let px = unsafe { ev.xmotion.x as f32 };
+            let py = unsafe { ev.xmotion.y as f32 };
+            let mut st = STATE.lock();
+            st.cursor_pos = [px, py];
+            continue;
         }
 
         if ev_type == GENERIC_EVENT {
             let xev_type = unsafe { ev.xcookie.evtype };
-            let capturing = ui_capturing();
-
-            if capturing {
-                if matches!(xev_type, XI_MOTION | XI_BUTTON_PRESS | XI_BUTTON_RELEASE) {
-                    if let (Some(get_data), Some(free_data)) =
-                        (fns.x_get_event_data, fns.x_free_event_data)
-                        && unsafe { get_data(display, &mut ev.xcookie) } != 0
-                        && !unsafe { ev.xcookie.data }.is_null()
-                    {
-                        let dev = unsafe { &*(ev.xcookie.data as *const XIDeviceEvent) };
-                        if dev.event != 0 {
-                            LAST_WINDOW.store(dev.event as usize, Ordering::Relaxed);
-                        }
-                        match xev_type {
-                            XI_MOTION => {
-                                let mut st = STATE.lock();
-                                st.cursor_pos = [dev.event_x as f32, dev.event_y as f32];
-                            }
-                            XI_BUTTON_PRESS | XI_BUTTON_RELEASE => {
-                                handle_mouse_ui(
-                                    dev.detail,
-                                    xev_type == XI_BUTTON_PRESS,
-                                    Some(dev.event_x as f32),
-                                    Some(dev.event_y as f32),
-                                );
-                            }
-                            _ => {}
-                        }
-                        unsafe { free_data(display, &mut ev.xcookie) };
+            if matches!(xev_type, XI_MOTION | XI_BUTTON_PRESS | XI_BUTTON_RELEASE) {
+                if let (Some(get_data), Some(free_data)) =
+                    (fns.x_get_event_data, fns.x_free_event_data)
+                    && unsafe { get_data(display, &mut ev.xcookie) } != 0
+                    && !unsafe { ev.xcookie.data }.is_null()
+                {
+                    let dev = unsafe { &*(ev.xcookie.data as *const XIDeviceEvent) };
+                    if dev.event != 0 {
+                        LAST_WINDOW.store(dev.event as usize, Ordering::Relaxed);
                     }
-                    continue;
+                    match xev_type {
+                        XI_MOTION => {
+                            let mut st = STATE.lock();
+                            st.cursor_pos = [dev.event_x as f32, dev.event_y as f32];
+                        }
+                        XI_BUTTON_PRESS | XI_BUTTON_RELEASE => {
+                            handle_mouse_ui(
+                                dev.detail,
+                                xev_type == XI_BUTTON_PRESS,
+                                Some(dev.event_x as f32),
+                                Some(dev.event_y as f32),
+                            );
+                        }
+                        _ => {}
+                    }
+                    unsafe { free_data(display, &mut ev.xcookie) };
                 }
-                if matches!(
-                    xev_type,
-                    XI_RAW_MOTION
-                        | XI_RAW_BUTTON_PRESS
-                        | XI_RAW_BUTTON_RELEASE
-                        | XI_RAW_KEY_PRESS
-                        | XI_RAW_KEY_RELEASE
-                ) {
-                    continue;
-                }
+                continue;
+            }
+            if matches!(
+                xev_type,
+                XI_RAW_MOTION
+                    | XI_RAW_BUTTON_PRESS
+                    | XI_RAW_BUTTON_RELEASE
+                    | XI_RAW_KEY_PRESS
+                    | XI_RAW_KEY_RELEASE
+            ) {
+                continue;
             }
             return 1;
         }
@@ -690,6 +743,7 @@ pub unsafe extern "C" fn hook_XCheckIfEvent(
         return 1;
     }
 }
+
 pub unsafe extern "C" fn hook_XGetEventData(
     display: *mut Display,
     cookie: *mut XGenericEventCookie,
@@ -698,7 +752,7 @@ pub unsafe extern "C" fn hook_XGetEventData(
         return 0;
     };
     let ok = unsafe { real(display, cookie) };
-    if ok != 0 && !cookie.is_null() {
+    if ok != 0 && !cookie.is_null() && !ui_capturing() {
         let c = unsafe { &*cookie };
         if !c.data.is_null() && (c.evtype == XI_BUTTON_PRESS || c.evtype == XI_BUTTON_RELEASE) {
             let dev = unsafe { &*(c.data as *const XIDeviceEvent) };
@@ -710,7 +764,6 @@ pub unsafe extern "C" fn hook_XGetEventData(
     }
     ok
 }
-
 
 pub unsafe extern "C" fn hook_XDefineCursor(
     display: *mut Display,
@@ -750,7 +803,7 @@ pub unsafe extern "C" fn hook_XGrabPointer(
 ) -> c_int {
     GAME_WANTS_GRAB.store(true, Ordering::Relaxed);
     if ui_capturing() {
-        return 0; // GrabSuccess
+        return 0;
     }
     if let Some(real) = resolve_x11().x_grab_pointer {
         unsafe {
@@ -795,6 +848,9 @@ pub unsafe extern "C" fn hook_xcb_grab_pointer(
         LAST_WINDOW.store(grab_window as usize, Ordering::Relaxed);
     }
     GAME_WANTS_GRAB.store(true, Ordering::Relaxed);
+    if ui_capturing() {
+        return 0;
+    }
     if let Some(real) = resolve_x11().xcb_grab_pointer {
         unsafe {
             real(
@@ -831,8 +887,4 @@ pub fn sync_cursor_from_ui_transition() {
             restore_cursor_for_game(dpy, win);
         }
     }
-}
-
-pub fn check_passive_mouse_button(detail: u32, pressed: bool) {
-    handle_mouse_button_passive(detail, pressed);
 }

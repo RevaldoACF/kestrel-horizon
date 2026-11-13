@@ -376,7 +376,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                     st.game.in_world = false;
                 }
                 while rx.try_recv().is_ok() {}
-                std::thread::sleep(Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(1000));
                 continue;
             }
         }
@@ -449,7 +449,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             continue;
         }
 
-        if live_snapshot.in_world && last_inv.elapsed() >= Duration::from_millis(250) {
+        if live_snapshot.in_world && last_inv.elapsed() >= Duration::from_millis(400) {
             last_inv = Instant::now();
             if let Some(v) = send_line(reader, writer, "inventory") {
                 if v.get("error").is_none() {
@@ -463,7 +463,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
 
         if live_snapshot.in_world
             && (cfg.hud_radar.enabled || cfg.auto_fish)
-            && last_ent.elapsed() >= Duration::from_millis(100)
+            && last_ent.elapsed() >= Duration::from_millis(200)
         {
             last_ent = Instant::now();
             if let Some(v) = send_line(reader, writer, "entities 48") {
@@ -628,6 +628,6 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             st.game = live_snapshot;
         }
 
-        std::thread::sleep(Duration::from_millis(45));
+        std::thread::sleep(Duration::from_millis(130));
     }
 }

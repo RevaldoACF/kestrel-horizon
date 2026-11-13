@@ -1,10 +1,12 @@
 use crate::config::FullbrightMode;
 use crate::draw::{DrawList, UiVertex};
 use crate::font::FontAtlas;
-use crate::hooks_x11::sync_cursor_from_ui_transition;
+use crate::hooks_vk::sync_xray_flags;
+use crate::hooks_x11::{set_ui_capturing, sync_cursor_from_ui_transition, PASSIVE_KEYS_MASK};
 use crate::hud::render_hud;
 use crate::state::STATE;
 use crate::ui::render_menu;
+use std::sync::atomic::Ordering;
 use ash::vk;
 use std::mem::size_of;
 use std::ptr;
@@ -427,17 +429,24 @@ impl VulkanOverlay {
         let render_pass = res.render_pass;
         let pipeline = res.pipeline;
 
-        // Build UI & HUD geometry under STATE lock
         let (refresh_lm, fb_enabled, fb_mode, fb_strength, capturing_now) = {
             let mut st = STATE.lock();
             st.screen_size = [extent.width.max(1), extent.height.max(1)];
             st.record_frame_time();
 
+            let mask = PASSIVE_KEYS_MASK.load(Ordering::Relaxed);
+            st.key_w = (mask & 1) != 0;
+            st.key_a = (mask & 2) != 0;
+            st.key_s = (mask & 4) != 0;
+            st.key_d = (mask & 8) != 0;
+            st.key_space = (mask & 16) != 0;
+
+            sync_xray_flags(st.config.xray_terrain, st.config.xray_entities);
+
             self.draw_list.clear(extent.width, extent.height);
             render_hud(&mut st, &mut self.draw_list, &self.atlas);
             render_menu(&mut st, &mut self.draw_list, &self.atlas);
 
-            // Clear per-frame input edge flags
             st.mouse_just_pressed = false;
             st.mouse_just_released = false;
             st.scroll_delta = 0.0;
@@ -445,6 +454,7 @@ impl VulkanOverlay {
             let refresh = st.lightmap_dirty;
             st.lightmap_dirty = false;
             let cap = st.menu_open || st.hud_edit_mode;
+            set_ui_capturing(cap);
             (
                 refresh,
                 st.config.fullbright_enabled,
@@ -726,13 +736,13 @@ impl VulkanOverlay {
                 return None;
             }
 
-            let stages =
-                vec![vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT; wait_semaphores.len()];
+            let stage_buf = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT; 8];
+            let stage_count = wait_semaphores.len().min(stage_buf.len());
             let sig = [slot.render_finished];
             let cmds = [cmd];
             let submit = vk::SubmitInfo::default()
-                .wait_semaphores(wait_semaphores)
-                .wait_dst_stage_mask(&stages)
+                .wait_semaphores(&wait_semaphores[..stage_count])
+                .wait_dst_stage_mask(&stage_buf[..stage_count])
                 .command_buffers(&cmds)
                 .signal_semaphores(&sig);
             if self.device.queue_submit(queue, &[submit], slot.fence).is_err() {
