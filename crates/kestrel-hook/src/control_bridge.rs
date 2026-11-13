@@ -97,6 +97,7 @@ pub struct LiveGameState {
     pub first_totem_slot: Option<usize>,
     pub nearby_entities: Vec<RadarEntity>,
     pub ore_markers: Vec<OreMarker>,
+    pub chest_markers: Vec<OreMarker>,
     pub horizon_gamma: Option<f32>,
     pub base_fov: Option<u32>,
 }
@@ -411,6 +412,11 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     let mut ore_scan_idx: usize = 0;
     let mut ore_cache: std::collections::HashMap<String, Vec<OreMarker>> =
         std::collections::HashMap::new();
+    let mut last_chests = Instant::now() - Duration::from_secs(5);
+    let mut chest_scan_idx: usize = 0;
+    let mut chest_cache: std::collections::HashMap<String, Vec<OreMarker>> =
+        std::collections::HashMap::new();
+    let mut last_dim = String::new();
     let mut saved_fov: Option<u32> = None;
     let mut zoomed_active = false;
 
@@ -545,13 +551,22 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             }
         }
 
+        if live_snapshot.dimension != last_dim {
+            last_dim = live_snapshot.dimension.clone();
+            ore_cache.clear();
+            chest_cache.clear();
+            live_snapshot.ore_markers.clear();
+            live_snapshot.chest_markers.clear();
+        }
+
         if live_snapshot.in_world && cfg.xray_ores {
-            if last_ores.elapsed() >= Duration::from_millis(160) {
+            if last_ores.elapsed() >= Duration::from_millis(140) {
                 last_ores = Instant::now();
                 let targets = ore_targets_for(&live_snapshot.dimension, cfg.xray_ore_preset);
                 let rad = cfg.xray_radius.clamp(12, 48);
                 let mut lost_conn = false;
-                for _ in 0..2 {
+                let batch = if live_snapshot.ore_markers.is_empty() { 4 } else { 2 };
+                for _ in 0..batch {
                     if targets.is_empty() {
                         break;
                     }
@@ -569,7 +584,10 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                                         p[1].as_i64().unwrap_or(0) as i32,
                                         p[2].as_i64().unwrap_or(0) as i32,
                                     ];
-                                    let d = item["distance"].as_f64().unwrap_or(0.0);
+                                    let d = dist3(
+                                        live_snapshot.eye,
+                                        [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+                                    );
                                     list.push(OreMarker { pos, kind, distance: d });
                                 }
                             }
@@ -584,10 +602,12 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                     conn = None;
                     continue;
                 }
+                let max_d = f64::from(rad) + 6.0;
                 let mut merged: Vec<OreMarker> = ore_cache
                     .iter()
                     .filter(|(k, _)| targets.iter().any(|(bid, _)| bid == &k.as_str()))
                     .flat_map(|(_, v)| v.iter().copied())
+                    .filter(|m| m.distance <= max_d)
                     .collect();
                 merged.sort_by(|a, b| a.distance.total_cmp(&b.distance));
                 merged.truncate(64);
@@ -596,6 +616,59 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         } else if !live_snapshot.ore_markers.is_empty() {
             live_snapshot.ore_markers.clear();
             ore_cache.clear();
+        }
+
+        if live_snapshot.in_world && cfg.esp_enabled && cfg.esp_chests {
+            if last_chests.elapsed() >= Duration::from_millis(240) {
+                last_chests = Instant::now();
+                let targets = storage_targets();
+                let rad = 32;
+                let mut lost_conn = false;
+                for _ in 0..2 {
+                    let (block_id, kind) = targets[chest_scan_idx % targets.len()];
+                    chest_scan_idx = chest_scan_idx.wrapping_add(1);
+                    if let Some(v) = send_line(reader, writer, &format!("find-block {block_id} {rad}")) {
+                        let mut list = Vec::new();
+                        if let Some(arr) = v.get("nearest").and_then(|x| x.as_array()) {
+                            for item in arr {
+                                if let Some(p) = item.get("pos").and_then(|x| x.as_array())
+                                    && p.len() >= 3
+                                {
+                                    let pos = [
+                                        p[0].as_i64().unwrap_or(0) as i32,
+                                        p[1].as_i64().unwrap_or(0) as i32,
+                                        p[2].as_i64().unwrap_or(0) as i32,
+                                    ];
+                                    let d = dist3(
+                                        live_snapshot.eye,
+                                        [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+                                    );
+                                    list.push(OreMarker { pos, kind, distance: d });
+                                }
+                            }
+                        }
+                        chest_cache.insert(block_id.to_string(), list);
+                    } else {
+                        lost_conn = true;
+                        break;
+                    }
+                }
+                if lost_conn {
+                    conn = None;
+                    continue;
+                }
+                let mut merged: Vec<OreMarker> = chest_cache
+                    .values()
+                    .flat_map(|v| v.iter().copied())
+                    .filter(|m| m.distance <= 38.0)
+                    .collect();
+                merged.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+                merged.truncate(48);
+                live_snapshot.chest_markers = merged;
+            }
+        } else if !live_snapshot.chest_markers.is_empty() {
+            live_snapshot.chest_markers.clear();
+            chest_cache.clear();
         }
 
         if last_opts.elapsed() >= Duration::from_secs(3) {
@@ -799,6 +872,23 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     }
 }
 
+fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn storage_targets() -> &'static [(&'static str, OreKind)] {
+    &[
+        ("minecraft:chest", OreKind::Chest),
+        ("minecraft:trapped_chest", OreKind::Chest),
+        ("minecraft:ender_chest", OreKind::Chest),
+        ("minecraft:barrel", OreKind::Chest),
+        ("minecraft:spawner", OreKind::Spawner),
+    ]
+}
+
 fn ore_targets_for(
     dimension: &str,
     preset: crate::config::OrePreset,
@@ -808,15 +898,11 @@ fn ore_targets_for(
             crate::config::OrePreset::Valuable => &[
                 ("minecraft:ancient_debris", OreKind::Debris),
                 ("minecraft:nether_gold_ore", OreKind::Gold),
-                ("minecraft:chest", OreKind::Chest),
-                ("minecraft:spawner", OreKind::Spawner),
             ],
             crate::config::OrePreset::All => &[
                 ("minecraft:ancient_debris", OreKind::Debris),
                 ("minecraft:nether_gold_ore", OreKind::Gold),
                 ("minecraft:nether_quartz_ore", OreKind::Quartz),
-                ("minecraft:chest", OreKind::Chest),
-                ("minecraft:spawner", OreKind::Spawner),
             ],
         }
     } else {
@@ -828,8 +914,6 @@ fn ore_targets_for(
                 ("minecraft:deepslate_emerald_ore", OreKind::Emerald),
                 ("minecraft:gold_ore", OreKind::Gold),
                 ("minecraft:deepslate_gold_ore", OreKind::Gold),
-                ("minecraft:chest", OreKind::Chest),
-                ("minecraft:spawner", OreKind::Spawner),
             ],
             crate::config::OrePreset::All => &[
                 ("minecraft:diamond_ore", OreKind::Diamond),
@@ -845,9 +929,9 @@ fn ore_targets_for(
                 ("minecraft:redstone_ore", OreKind::Redstone),
                 ("minecraft:deepslate_redstone_ore", OreKind::Redstone),
                 ("minecraft:copper_ore", OreKind::Copper),
+                ("minecraft:deepslate_copper_ore", OreKind::Copper),
                 ("minecraft:coal_ore", OreKind::Coal),
-                ("minecraft:chest", OreKind::Chest),
-                ("minecraft:spawner", OreKind::Spawner),
+                ("minecraft:deepslate_coal_ore", OreKind::Coal),
             ],
         }
     }

@@ -70,6 +70,7 @@ pub enum FocusId {
     EspHostileToggle,
     EspPassiveToggle,
     EspItemsToggle,
+    EspChestsToggle,
     FreecamToggle,
     FreecamSpeedSlider,
     AimAssistToggle,

@@ -131,6 +131,7 @@ pub struct KestrelConfig {
     pub esp_hostile: bool,
     pub esp_passive: bool,
     pub esp_items: bool,
+    pub esp_chests: bool,
 
     // Freecam
     pub freecam_enabled: bool,
@@ -194,6 +195,7 @@ impl Default for KestrelConfig {
             esp_hostile: true,
             esp_passive: false,
             esp_items: false,
+            esp_chests: false,
 
             freecam_enabled: false,
             freecam_speed: 14.0,

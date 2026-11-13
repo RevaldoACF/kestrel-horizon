@@ -64,13 +64,14 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
 
     // 3D Ore X-Ray ESP boxes (when inside world)
     if st.config.xray_ores && st.game.in_world {
-        draw_ore_xray(st, dl, atlas, sw, sh);
+        draw_block_markers(st, dl, atlas, sw, sh, &st.game.ore_markers, 32.0);
     }
-    // 3D Entity ESP & Tracers (players, hostile mobs, passive mobs, items)
+    if st.config.esp_enabled && st.config.esp_chests && st.game.in_world {
+        draw_block_markers(st, dl, atlas, sw, sh, &st.game.chest_markers, 36.0);
+    }
     if (st.config.esp_enabled || st.config.tracers_enabled) && st.game.in_world {
         draw_entity_esp_and_tracers(st, dl, atlas, sw, sh);
     }
-
     if st.config.freecam_enabled && st.game.in_world {
         let txt = "Freecam Active · WASD/Space/Shift to fly";
         let tw = atlas.measure(FontKind::UiSemi, txt) + 24.0;
@@ -988,20 +989,84 @@ fn project_point(m: &[[f32; 4]; 4], rx: f32, ry: f32, rz: f32, sw: f32, sh: f32)
     Some([(nx * 0.5 + 0.5) * sw, (0.5 - ny * 0.5) * sh])
 }
 
-fn draw_ore_xray(st: &AppState, dl: &mut DrawList, atlas: &FontAtlas, sw: f32, sh: f32) {
-    let Some(vp) = latest_view_proj() else {
-        return;
-    };
-    if st.game.ore_markers.is_empty() {
+fn fallback_view_proj(yaw: f32, pitch: f32, fov_deg: f32, sw: f32, sh: f32) -> [[f32; 4]; 4] {
+    let deg = std::f32::consts::PI / 180.0;
+    let angle_y = std::f32::consts::PI - yaw * deg;
+    let angle_x = -pitch * deg;
+    let (sy, cy) = (angle_y * 0.5).sin_cos();
+    let (sx, cx) = (angle_x * 0.5).sin_cos();
+    let qx = -(cy * sx);
+    let qy = -(sy * cx);
+    let qz = -(sy * sx);
+    let qw = cy * cx;
+
+    let x2 = qx + qx;
+    let y2 = qy + qy;
+    let z2 = qz + qz;
+    let xx = qx * x2;
+    let xy = qx * y2;
+    let xz = qx * z2;
+    let yy = qy * y2;
+    let yz = qy * z2;
+    let zz = qz * z2;
+    let wx = qw * x2;
+    let wy = qw * y2;
+    let wz = qw * z2;
+
+    let view = [
+        [1.0 - (yy + zz), xy + wz, xz - wy, 0.0],
+        [xy - wz, 1.0 - (xx + zz), yz + wx, 0.0],
+        [xz + wy, yz - wx, 1.0 - (xx + yy), 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    let h = (fov_deg.clamp(20.0, 140.0) * deg * 0.5).tan();
+    let aspect = (sw / sh.max(1.0)).max(0.1);
+    let near = 768.0f32;
+    let far = 0.05f32;
+    let p00 = 1.0 / (h * aspect);
+    let p11 = 1.0 / h;
+    let p22 = far / (near - far);
+    let p32 = (far * near) / (near - far);
+
+    let mut out = [[0.0f32; 4]; 4];
+    for c in 0..4 {
+        out[c][0] = p00 * view[c][0];
+        out[c][1] = p11 * view[c][1];
+        out[c][2] = p22 * view[c][2] + p32 * view[c][3];
+        out[c][3] = -view[c][2];
+    }
+    out
+}
+
+fn active_view_proj(st: &AppState, sw: f32, sh: f32) -> [[f32; 4]; 4] {
+    if let Some(vp) = latest_view_proj() {
+        return vp;
+    }
+    let fov = st.game.base_fov.unwrap_or(85) as f32;
+    fallback_view_proj(st.game.yaw, st.game.pitch, fov, sw, sh)
+}
+
+fn draw_block_markers(
+    st: &AppState,
+    dl: &mut DrawList,
+    atlas: &FontAtlas,
+    sw: f32,
+    sh: f32,
+    markers: &[crate::control_bridge::OreMarker],
+    label_dist: f64,
+) {
+    if markers.is_empty() {
         return;
     }
+    let vp = active_view_proj(st, sw, sh);
     let eye = [
         st.game.eye[0] + f64::from(st.freecam_offset[0]),
         st.game.eye[1] + f64::from(st.freecam_offset[1]),
         st.game.eye[2] + f64::from(st.freecam_offset[2]),
     ];
 
-    for marker in st.game.ore_markers.iter().take(48) {
+    for marker in markers.iter().take(48) {
         let bx = marker.pos[0] as f64 - eye[0];
         let by = marker.pos[1] as f64 - eye[1];
         let bz = marker.pos[2] as f64 - eye[2];
@@ -1046,7 +1111,7 @@ fn draw_ore_xray(st: &AppState, dl: &mut DrawList, atlas: &FontAtlas, sw: f32, s
             col.with_alpha(0.92),
         );
 
-        if marker.distance <= 32.0 {
+        if marker.distance <= label_dist {
             let tag = format!("{} {:.0}m", marker.kind.short_label(), marker.distance);
             let tw = atlas.measure(FontKind::MonoSmall, &tag) + 8.0;
             let tx = x0 + (w - tw) * 0.5;
@@ -1064,9 +1129,7 @@ fn draw_entity_esp_and_tracers(
     sw: f32,
     sh: f32,
 ) {
-    let Some(vp) = latest_view_proj() else {
-        return;
-    };
+    let vp = active_view_proj(st, sw, sh);
     if st.game.nearby_entities.is_empty() {
         return;
     }

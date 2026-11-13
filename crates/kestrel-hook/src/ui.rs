@@ -708,12 +708,13 @@ fn render_survival_tab(
         focusables,
     );
 
-    let q_w = (w - 62.0) / 4.0;
+    let q_w = (w - 72.0) / 5.0;
     let filters = [
         ("Players", st.config.esp_players, FocusId::EspPlayersToggle),
         ("Hostile", st.config.esp_hostile, FocusId::EspHostileToggle),
         ("Passive", st.config.esp_passive, FocusId::EspPassiveToggle),
         ("Items", st.config.esp_items, FocusId::EspItemsToggle),
+        ("Chests", st.config.esp_chests, FocusId::EspChestsToggle),
     ];
     for (idx, (lbl, on, fid)) in filters.into_iter().enumerate() {
         let fx = esp_rect.x + 16.0 + idx as f32 * (q_w + 10.0);
@@ -2242,6 +2243,7 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.xray_entities = false;
             st.config.xray_ores = false;
             st.config.esp_enabled = false;
+            st.config.esp_chests = false;
             st.config.tracers_enabled = false;
             st.config.freecam_enabled = false;
             st.config.aim_assist = false;
@@ -2331,6 +2333,9 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         }
         FocusId::EspItemsToggle => {
             st.config.esp_items = !st.config.esp_items;
+        }
+        FocusId::EspChestsToggle => {
+            st.config.esp_chests = !st.config.esp_chests;
         }
         FocusId::FreecamToggle => {
             st.config.freecam_enabled = !st.config.freecam_enabled;
