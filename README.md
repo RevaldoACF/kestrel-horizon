@@ -5,19 +5,18 @@ In-process Vulkan + X11 survival client (`libkestrel.so` + `kestrel-inject`) for
 ## Features
 
 - **Menu Toggle (`~` or `` ` ``)**: In-game Vulkan overlay UI with keyboard navigation (`Tab`, `Enter`, `Arrows`, `Esc`), search bar, live config persistence (`~/.local/share/horizon/kestrel-client.json`), and **Panic** instant-disable button.
-- **Fullbright**: Direct Vulkan `16x16` lightmap `VkImage` interception (`Max 100%` or `Soft Blend`), toggling instantaneously even while standing still.
+- **Fullbright**: Lights up dark caves and night areas without torches.
 - **X-Ray Vision**:
-  - **Cave Wireframe**: Swaps Horizon terrain solid/opaque pipelines to `VK_POLYGON_MODE_LINE` + `CULL_NONE` at `vkCmdBindPipeline`.
-  - **Chests & Mobs ESP**: Renders entities and block entities with `VK_COMPARE_OP_ALWAYS` depth bypass through walls.
-  - Configurable quick-toggle hotkey (`X` / `B` / `Off`).
-- **Wurst7-Inspired Survival & Utility Modules** (via `horizon-control.sock` when `agentControl:true` in `horizon-extras.txt`):
-  - **Entity Radar HUD**: Rotating top-down minimap plotting nearby mobs, players, dropped items, and XP orbs.
-  - **AutoSprint**, **AutoRespawn**, **AutoEat** (configurable hunger threshold), **AutoTotem**, **AutoFish**, **TriggerBot** (configurable cooldown), **AutoClicker** (configurable CPS), **AntiAFK**.
+  - **Ore X-Ray (3D ESP)**: Highlights buried ores (Diamond, Ancient Debris, Emerald, Gold, Iron, Lapis, Redstone, Chests, Spawners) with distance tags.
+  - **Cave Wireframe**: Reveals underground caves and lava pockets.
+  - **Chest & Mob Through-Walls**: Renders entities and chests behind walls.
+- **ESP, Tracers & Freecam**:
+  - **Entity ESP & Tracers**: Color-coded 3D boxes and guide lines for Players (yellow), Hostile Mobs (red), Passive Mobs (green), and Items.
+  - **Freecam**: Fly the camera through walls to scout while your character stays safely in place.
+- **Combat & Survival Helpers**:
+  - **AimAssist** (configurable target filter, FOV, range, and smoothness), **TriggerBot**, **AutoClicker**, **AutoSprint**, **AutoRespawn**, **AutoEat**, **AutoTotem**, **AutoFish**, and **AntiAFK**.
 - **Survival HUD & Layout Editor**:
-  - Draggable **Coordinates + Nether Portal Converter**, **FPS / 1% Low / Fullbright & X-Ray badge**, **Keystrokes + LMB/RMB CPS**, **Vitals / Totem / Target**, **Waypoint Compass**, **Session Clock**, and **Crosshair+**.
-
-## Building on GitHub Actions
-
+  - Draggable **Entity Radar** (White: You, Yellow: Players, Red: Hostile, Green: Non-Hostile), **Coordinates + Nether Converter**, **FPS / 1% Low**, **Keystrokes + CPS**, **Vitals & Totems**, **Waypoint Compass**, **Session Clock**, and **Crosshair+**.
 Push to `main` or trigger the **Build Kestrel Horizon Client** workflow in `.github/workflows/build.yml` to build `libkestrel.so` and `kestrel-inject` on `ubuntu-latest` and download the `kestrel-horizon-linux-x86_64` artifact.
 
 ## Usage (Linux x86_64)

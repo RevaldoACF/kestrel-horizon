@@ -56,6 +56,23 @@ impl OrePreset {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AimTarget {
+    Hostile,
+    Players,
+    Both,
+}
+
+impl AimTarget {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hostile => "Hostile",
+            Self::Players => "Players",
+            Self::Both => "Both",
+        }
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrosshairStyle {
@@ -107,6 +124,25 @@ pub struct KestrelConfig {
     pub xray_ores: bool,
     pub xray_ore_preset: OrePreset,
     pub xray_radius: i32,
+    // ESP & Tracers
+    pub esp_enabled: bool,
+    pub tracers_enabled: bool,
+    pub esp_players: bool,
+    pub esp_hostile: bool,
+    pub esp_passive: bool,
+    pub esp_items: bool,
+
+    // Freecam
+    pub freecam_enabled: bool,
+    pub freecam_speed: f32,
+
+    // AimAssist
+    pub aim_assist: bool,
+    pub aim_target: AimTarget,
+    pub aim_fov: f32,
+    pub aim_range: f32,
+    pub aim_smooth: f32,
+
 
     pub zoom_enabled: bool,
     pub zoom_fov: u32,
@@ -152,6 +188,22 @@ impl Default for KestrelConfig {
             xray_ores: false,
             xray_ore_preset: OrePreset::Valuable,
             xray_radius: 28,
+            esp_enabled: false,
+            tracers_enabled: false,
+            esp_players: true,
+            esp_hostile: true,
+            esp_passive: false,
+            esp_items: false,
+
+            freecam_enabled: false,
+            freecam_speed: 14.0,
+
+            aim_assist: false,
+            aim_target: AimTarget::Both,
+            aim_fov: 70.0,
+            aim_range: 4.5,
+            aim_smooth: 0.45,
+
 
             fullbright_strength: 1.0,
 

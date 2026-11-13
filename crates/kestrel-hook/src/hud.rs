@@ -1,5 +1,5 @@
 use crate::config::{CrosshairStyle, HudWidget};
-use crate::control_bridge::OreKind;
+use crate::control_bridge::{is_hostile_mob_id, OreKind};
 use crate::hooks_vk::latest_view_proj;
 use crate::draw::{palette, Color, DrawList, Rect};
 use crate::font::{FontAtlas, FontKind};
@@ -57,7 +57,7 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     let sh = st.screen_size[1].max(1) as f32;
     let editing = st.hud_edit_mode;
 
-    // Show HUD only inside an active world (or during HUD layout editing), just like Lunar/Wurst
+    // Show HUD only inside an active world (or during HUD layout editing)
     if !st.game.in_world && !editing {
         return;
     }
@@ -66,6 +66,19 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     if st.config.xray_ores && st.game.in_world {
         draw_ore_xray(st, dl, atlas, sw, sh);
     }
+    // 3D Entity ESP & Tracers (players, hostile mobs, passive mobs, items)
+    if (st.config.esp_enabled || st.config.tracers_enabled) && st.game.in_world {
+        draw_entity_esp_and_tracers(st, dl, atlas, sw, sh);
+    }
+
+    if st.config.freecam_enabled && st.game.in_world {
+        let txt = "Freecam Active · WASD/Space/Shift to fly";
+        let tw = atlas.measure(FontKind::UiSemi, txt) + 24.0;
+        let br = Rect::new((sw - tw) * 0.5, 68.0, tw, 26.0);
+        dl.rect_border(br, 6.0, palette::HUD_BG, 1.0, palette::ACCENT);
+        dl.text(atlas, FontKind::UiSemi, br.x + 12.0, br.y + 5.0, txt, palette::ACCENT);
+    }
+
 
     // Crosshair+ (only while playing with menu closed)
     if st.config.crosshair_enabled && !st.menu_open && st.game.screen == "playing" {
@@ -821,50 +834,6 @@ fn draw_clock_widget(
     r
 }
 
-fn is_hostile_mob(id: &str) -> bool {
-    let name = id.strip_prefix("minecraft:").unwrap_or(id);
-    matches!(
-        name,
-        "zombie"
-            | "zombie_villager"
-            | "husk"
-            | "drowned"
-            | "skeleton"
-            | "stray"
-            | "bogged"
-            | "wither_skeleton"
-            | "creeper"
-            | "spider"
-            | "cave_spider"
-            | "enderman"
-            | "endermite"
-            | "silverfish"
-            | "witch"
-            | "slime"
-            | "magma_cube"
-            | "blaze"
-            | "ghast"
-            | "phantom"
-            | "pillager"
-            | "vindicator"
-            | "evoker"
-            | "ravager"
-            | "vex"
-            | "warden"
-            | "guardian"
-            | "elder_guardian"
-            | "shulker"
-            | "piglin_brute"
-            | "hoglin"
-            | "zoglin"
-            | "zombified_piglin"
-            | "piglin"
-            | "breeze"
-            | "creaking"
-            | "ender_dragon"
-            | "wither"
-    )
-}
 
 fn draw_radar_widget(
     st: &AppState,
@@ -933,7 +902,7 @@ fn draw_radar_widget(
                 Color::hex(0xF5C542, 1.0) // Yellow: other players
             } else if e.kind == "item" {
                 Color::hex(0x9FB1C8, 1.0) // Muted steel: dropped items
-            } else if e.kind == "orb" || !is_hostile_mob(&e.label) {
+            } else if e.kind == "orb" || !is_hostile_mob_id(&e.label) {
                 palette::SUCCESS // Green: non-hostile mobs & XP
             } else {
                 palette::DANGER // Red: hostile mobs
@@ -1026,7 +995,11 @@ fn draw_ore_xray(st: &AppState, dl: &mut DrawList, atlas: &FontAtlas, sw: f32, s
     if st.game.ore_markers.is_empty() {
         return;
     }
-    let eye = st.game.eye;
+    let eye = [
+        st.game.eye[0] + f64::from(st.freecam_offset[0]),
+        st.game.eye[1] + f64::from(st.freecam_offset[1]),
+        st.game.eye[2] + f64::from(st.freecam_offset[2]),
+    ];
 
     for marker in st.game.ore_markers.iter().take(48) {
         let bx = marker.pos[0] as f64 - eye[0];
@@ -1080,6 +1053,145 @@ fn draw_ore_xray(st: &AppState, dl: &mut DrawList, atlas: &FontAtlas, sw: f32, s
             let ty = (y0 - 16.0).max(4.0);
             dl.rect(Rect::new(tx, ty, tw, 15.0), 3.0, Color::hex(0x0F1216, 0.78));
             dl.text(atlas, FontKind::MonoSmall, tx + 4.0, ty + 1.0, &tag, col);
+        }
+    }
+}
+
+fn draw_entity_esp_and_tracers(
+    st: &AppState,
+    dl: &mut DrawList,
+    atlas: &FontAtlas,
+    sw: f32,
+    sh: f32,
+) {
+    let Some(vp) = latest_view_proj() else {
+        return;
+    };
+    if st.game.nearby_entities.is_empty() {
+        return;
+    }
+    let eye = [
+        st.game.eye[0] + f64::from(st.freecam_offset[0]),
+        st.game.eye[1] + f64::from(st.freecam_offset[1]),
+        st.game.eye[2] + f64::from(st.freecam_offset[2]),
+    ];
+    let origin = [sw * 0.5, sh * 0.5];
+
+    for e in &st.game.nearby_entities {
+        let is_player = e.label == "minecraft:player";
+        let is_item = e.kind == "item";
+        let is_orb = e.kind == "orb";
+        let is_hostile = !is_player && !is_item && !is_orb && is_hostile_mob_id(&e.label);
+        let is_passive = !is_player && !is_item && !is_hostile;
+
+        let show = (is_player && st.config.esp_players)
+            || (is_hostile && st.config.esp_hostile)
+            || (is_passive && st.config.esp_passive)
+            || (is_item && st.config.esp_items);
+        if !show {
+            continue;
+        }
+
+        let col = if is_player {
+            Color::hex(0xF5C542, 1.0)
+        } else if is_hostile {
+            palette::DANGER
+        } else if is_item {
+            Color::hex(0x9FB1C8, 1.0)
+        } else {
+            palette::SUCCESS
+        };
+
+        let (hw, h) = if is_player {
+            (0.35, 1.85)
+        } else if is_item || is_orb {
+            (0.22, 0.35)
+        } else {
+            (0.42, 1.55)
+        };
+
+        let ex = e.pos[0] - eye[0];
+        let ey = e.pos[1] - eye[1];
+        let ez = e.pos[2] - eye[2];
+
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut any_front = false;
+
+        for dx in [-hw, hw] {
+            for dy in [0.0, h] {
+                for dz in [-hw, hw] {
+                    if let Some([sx, sy]) =
+                        project_point(&vp, (ex + dx) as f32, (ey + dy) as f32, (ez + dz) as f32, sw, sh)
+                    {
+                        any_front = true;
+                        min_x = min_x.min(sx);
+                        min_y = min_y.min(sy);
+                        max_x = max_x.max(sx);
+                        max_y = max_y.max(sy);
+                    }
+                }
+            }
+        }
+
+        let center_pt = project_point(&vp, ex as f32, (ey + h * 0.5) as f32, ez as f32, sw, sh);
+
+        if st.config.tracers_enabled && !is_item && !is_orb {
+            let target_pt = if let Some([cx, cy]) = center_pt {
+                [cx.clamp(6.0, sw - 6.0), cy.clamp(6.0, sh - 6.0)]
+            } else {
+                let rx = ex as f32;
+                let ry = (ey + h * 0.5) as f32;
+                let rz = ez as f32;
+                let cx = vp[0][0] * rx + vp[1][0] * ry + vp[2][0] * rz + vp[3][0];
+                let cy = vp[0][1] * rx + vp[1][1] * ry + vp[2][1] * rz + vp[3][1];
+                let ang = (-cy).atan2(-cx);
+                [
+                    (origin[0] + ang.cos() * sw * 0.45).clamp(8.0, sw - 8.0),
+                    (origin[1] - ang.sin() * sh * 0.45).clamp(8.0, sh - 8.0),
+                ]
+            };
+            dl.line(origin, target_pt, 1.4, col.with_alpha(0.72));
+        }
+
+        if st.config.esp_enabled
+            && any_front
+            && max_x >= 0.0
+            && max_y >= 0.0
+            && min_x <= sw
+            && min_y <= sh
+        {
+            let x0 = min_x.max(-4.0);
+            let y0 = min_y.max(-4.0);
+            let bw = (max_x.min(sw + 4.0) - x0).clamp(10.0, sw * 0.6);
+            let bh = (max_y.min(sh + 4.0) - y0).clamp(10.0, sh * 0.7);
+            dl.rect_border(
+                Rect::new(x0, y0, bw, bh),
+                3.0,
+                col.with_alpha(0.08),
+                1.6,
+                col.with_alpha(0.95),
+            );
+
+            if e.distance <= 40.0 {
+                let clean = e
+                    .label
+                    .strip_prefix("minecraft:")
+                    .unwrap_or(&e.label)
+                    .replace('_', " ");
+                let tag = if let Some(hp) = e.health {
+                    format!("{clean} {:.0}hp · {:.0}m", hp, e.distance)
+                } else {
+                    format!("{clean} {:.0}m", e.distance)
+                };
+                let tw = atlas.measure(FontKind::MonoSmall, &tag) + 8.0;
+                let tx = x0 + (bw - tw) * 0.5;
+                let ty = (y0 - 16.0).max(4.0);
+                dl.rect(Rect::new(tx, ty, tw, 15.0), 3.0, Color::hex(0x0F1216, 0.80));
+                dl.text(atlas, FontKind::MonoSmall, tx + 4.0, ty + 1.0, &tag, col);
+            }
         }
     }
 }

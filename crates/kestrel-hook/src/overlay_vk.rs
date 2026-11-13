@@ -2,7 +2,7 @@ use crate::config::FullbrightMode;
 use crate::draw::{DrawList, UiVertex};
 use crate::font::FontAtlas;
 use crate::hooks_vk::sync_xray_flags;
-use crate::hooks_x11::{set_ui_capturing, sync_cursor_from_ui_transition, PASSIVE_KEYS_MASK};
+use crate::hooks_x11::{set_freecam_active, set_ui_capturing, sync_cursor_from_ui_transition, PASSIVE_KEYS_MASK};
 use crate::hud::render_hud;
 use crate::state::STATE;
 use crate::ui::render_menu;
@@ -440,13 +440,70 @@ impl VulkanOverlay {
             st.key_s = (mask & 4) != 0;
             st.key_d = (mask & 8) != 0;
             st.key_space = (mask & 16) != 0;
+            let shift_down = (mask & 128) != 0;
+            let now = std::time::Instant::now();
+            let dt = now
+                .duration_since(st.last_freecam_step)
+                .as_secs_f32()
+                .min(0.1);
+            st.last_freecam_step = now;
 
+            let freecam_on = st.config.freecam_enabled && st.game.in_world;
+            set_freecam_active(freecam_on);
+            if freecam_on {
+                if !st.menu_open && !st.hud_edit_mode {
+                    let yr = st.game.yaw.to_radians();
+                    let pr = st.game.pitch.to_radians();
+                    let fwd = [-yr.sin() * pr.cos(), -pr.sin(), yr.cos() * pr.cos()];
+                    let right = [-yr.cos(), 0.0, -yr.sin()];
+                    let spd = st.config.freecam_speed * dt;
+                    let mut mv = [0.0f32; 3];
+                    if st.key_w {
+                        for i in 0..3 {
+                            mv[i] += fwd[i];
+                        }
+                    }
+                    if st.key_s {
+                        for i in 0..3 {
+                            mv[i] -= fwd[i];
+                        }
+                    }
+                    if st.key_d {
+                        for i in 0..3 {
+                            mv[i] += right[i];
+                        }
+                    }
+                    if st.key_a {
+                        for i in 0..3 {
+                            mv[i] -= right[i];
+                        }
+                    }
+                    if st.key_space {
+                        mv[1] += 1.0;
+                    }
+                    if shift_down {
+                        mv[1] -= 1.0;
+                    }
+                    let mlen = (mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2]).sqrt();
+                    if mlen > 0.01 {
+                        for i in 0..3 {
+                            st.freecam_offset[i] += (mv[i] / mlen) * spd;
+                        }
+                    }
+                }
+            } else {
+                st.freecam_offset = [0.0; 3];
+            }
+
+            let need_vp = st.config.esp_enabled || st.config.tracers_enabled;
             sync_xray_flags(
                 st.config.xray_terrain,
                 st.config.xray_entities,
                 st.config.xray_ores,
+                need_vp,
+                freecam_on,
+                st.freecam_offset,
             );
-
             self.draw_list.clear(extent.width, extent.height);
             render_hud(&mut st, &mut self.draw_list, &self.atlas);
             render_menu(&mut st, &mut self.draw_list, &self.atlas);

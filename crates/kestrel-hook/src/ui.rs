@@ -1,4 +1,4 @@
-use crate::config::{CrosshairStyle, FullbrightMode, KestrelConfig, OrePreset, Waypoint, XrayKey, ZoomKey};
+use crate::config::{AimTarget, CrosshairStyle, FullbrightMode, KestrelConfig, OrePreset, Waypoint, XrayKey, ZoomKey};
 use crate::control_bridge::{send_cmd, ControlCmd};
 use crate::draw::{palette, Color, DrawList, Rect};
 use crate::font::{FontAtlas, FontKind};
@@ -155,11 +155,11 @@ pub fn render_menu(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     );
 
     let tabs = [
-        (NavTab::Survival, FocusId::TabSurvival, "Survival", "Fullbright, X-Ray, Zoom"),
-        (NavTab::Automation, FocusId::TabAutomation, "Automation", "Wurst7 Auto & Combat"),
+        (NavTab::Survival, FocusId::TabSurvival, "Visuals", "Fullbright, ESP, Freecam"),
+        (NavTab::Automation, FocusId::TabAutomation, "Combat & Auto", "AimAssist, AutoEat, Tools"),
         (NavTab::Hud, FocusId::TabHud, "HUD Overlay", "Coords, Radar, CPS"),
         (NavTab::Waypoints, FocusId::TabWaypoints, "Waypoints", "Markers & Portal Math"),
-        (NavTab::System, FocusId::TabSystem, "System & Keys", "Hooks, Socket, Config"),
+        (NavTab::System, FocusId::TabSystem, "Settings", "Status, Keys, Config"),
     ];
 
     for (i, (tab, fid, title, sub)) in tabs.iter().enumerate() {
@@ -355,7 +355,7 @@ fn render_survival_tab(
         FontKind::UiSmall,
         hero.x + 48.0,
         hero.y + 42.0,
-        "Overrides the GPU 16x16 lightmap texture directly in Vulkan so caves and night stay clear.",
+        "Lights up dark caves and night vision areas without needing torches.",
         palette::TEXT_SECONDARY,
     );
 
@@ -421,9 +421,9 @@ fn render_survival_tab(
     );
 
     let hook_note = if st.lightmap_hooked {
-        "GPU Lightmap active · toggles instantaneously even while standing still"
+        "Active · brightens dark caves and night areas immediately."
     } else {
-        "Waiting for world renderer to initialize lightmap texture"
+        "Ready · join a world to activate full brightness."
     };
     dl.text(
         atlas,
@@ -457,7 +457,7 @@ fn render_survival_tab(
         FontKind::UiSmall,
         z_rect.x + 16.0,
         z_rect.y + 38.0,
-        "Hold key to narrow FOV via Horizon control.",
+        "Hold key to smoothly zoom in on distant targets.",
         palette::TEXT_SECONDARY,
     );
     draw_toggle_pill(
@@ -663,6 +663,117 @@ fn render_survival_tab(
     );
 
     y += 192.0;
+    // Entity ESP & Tracers Card
+    let esp_rect = Rect::new(x, y, w, 146.0);
+    dl.rect_border(esp_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(
+        atlas,
+        FontKind::UiHeading,
+        esp_rect.x + 16.0,
+        esp_rect.y + 14.0,
+        "Entity ESP & Tracers",
+        palette::TEXT_PRIMARY,
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        esp_rect.x + 16.0,
+        esp_rect.y + 38.0,
+        "Draw boxes and guide lines to nearby players, hostile mobs, animals, and loot.",
+        palette::TEXT_SECONDARY,
+    );
+
+    let half_w = (w - 46.0) * 0.5;
+    let e_row = Rect::new(esp_rect.x + 16.0, esp_rect.y + 64.0, half_w, 28.0);
+    dl.text(atlas, FontKind::UiSemi, e_row.x, e_row.y + 5.0, "3D Box ESP", palette::TEXT_PRIMARY);
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(e_row.x + e_row.w - 64.0, e_row.y, 64.0, 28.0),
+        st.config.esp_enabled,
+        FocusId::EspToggle,
+        focusables,
+    );
+
+    let t_row = Rect::new(esp_rect.x + 30.0 + half_w, esp_rect.y + 64.0, half_w, 28.0);
+    dl.text(atlas, FontKind::UiSemi, t_row.x, t_row.y + 5.0, "Tracers", palette::TEXT_PRIMARY);
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(t_row.x + t_row.w - 64.0, t_row.y, 64.0, 28.0),
+        st.config.tracers_enabled,
+        FocusId::TracersToggle,
+        focusables,
+    );
+
+    let q_w = (w - 62.0) / 4.0;
+    let filters = [
+        ("Players", st.config.esp_players, FocusId::EspPlayersToggle),
+        ("Hostile", st.config.esp_hostile, FocusId::EspHostileToggle),
+        ("Passive", st.config.esp_passive, FocusId::EspPassiveToggle),
+        ("Items", st.config.esp_items, FocusId::EspItemsToggle),
+    ];
+    for (idx, (lbl, on, fid)) in filters.into_iter().enumerate() {
+        let fx = esp_rect.x + 16.0 + idx as f32 * (q_w + 10.0);
+        draw_segment_button(
+            st,
+            dl,
+            atlas,
+            Rect::new(fx, esp_rect.y + 104.0, q_w, 28.0),
+            lbl,
+            on,
+            fid,
+            focusables,
+        );
+    }
+    y += 160.0;
+
+    // Freecam Card
+    let fc_rect = Rect::new(x, y, w, 108.0);
+    dl.rect_border(fc_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(
+        atlas,
+        FontKind::UiHeading,
+        fc_rect.x + 16.0,
+        fc_rect.y + 14.0,
+        "Freecam",
+        palette::TEXT_PRIMARY,
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        fc_rect.x + 16.0,
+        fc_rect.y + 38.0,
+        "Fly the camera freely to scout caves and bases while your character stays still.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(fc_rect.x + w - 82.0, fc_rect.y + 14.0, 66.0, 28.0),
+        st.config.freecam_enabled,
+        FocusId::FreecamToggle,
+        focusables,
+    );
+    draw_slider(
+        st,
+        dl,
+        atlas,
+        Rect::new(fc_rect.x + 16.0, fc_rect.y + 58.0, w - 32.0, 42.0),
+        "Flight Speed",
+        &format!("{:.0} blk/s", st.config.freecam_speed),
+        st.config.freecam_speed,
+        4.0,
+        36.0,
+        2.0,
+        FocusId::FreecamSpeedSlider,
+        focusables,
+    );
+    y += 122.0;
+
 
     // Compact bottom strip: Horizon Vanilla Gamma Sync
     let g_rect = Rect::new(x, y, w, 72.0);
@@ -708,7 +819,7 @@ fn render_automation_tab(
             FontKind::UiSemi,
             banner.x + 14.0,
             banner.y + 10.0,
-            "Horizon Control Socket Offline",
+            "Game Link Inactive",
             palette::DANGER,
         );
         dl.text(
@@ -716,40 +827,116 @@ fn render_automation_tab(
             FontKind::UiSmall,
             banner.x + 14.0,
             banner.y + 31.0,
-            "Enable agentControl:true in horizon-extras.txt so automation modules can control gameplay.",
+            "Turn on agentControl in Horizon Extras so player & combat helpers can run.",
             palette::TEXT_SECONDARY,
         );
         y += 70.0;
     }
 
+    // AimAssist Hero Card
+    let aim_r = Rect::new(x, y, w, 178.0);
+    dl.rect_border(aim_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(atlas, FontKind::UiHeading, aim_r.x + 16.0, aim_r.y + 12.0, "AimAssist", palette::TEXT_PRIMARY);
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        aim_r.x + 16.0,
+        aim_r.y + 35.0,
+        "Smoothly keeps your crosshair lined up with nearby zombies, mobs, or players.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(aim_r.x + w - 82.0, aim_r.y + 14.0, 66.0, 28.0),
+        st.config.aim_assist,
+        FocusId::AimAssistToggle,
+        focusables,
+    );
+    draw_cycle_row(
+        st,
+        dl,
+        atlas,
+        Rect::new(aim_r.x + 16.0, aim_r.y + 62.0, w - 32.0, 28.0),
+        "Targets",
+        st.config.aim_target.label(),
+        FocusId::AimTargetCycle,
+        focusables,
+    );
+    let aim_third = (w - 56.0) / 3.0;
+    draw_slider(
+        st,
+        dl,
+        atlas,
+        Rect::new(aim_r.x + 16.0, aim_r.y + 104.0, aim_third, 50.0),
+        "FOV",
+        &format!("{:.0} deg", st.config.aim_fov),
+        st.config.aim_fov,
+        20.0,
+        150.0,
+        5.0,
+        FocusId::AimFovSlider,
+        focusables,
+    );
+    draw_slider(
+        st,
+        dl,
+        atlas,
+        Rect::new(aim_r.x + 28.0 + aim_third, aim_r.y + 104.0, aim_third, 50.0),
+        "Range",
+        &format!("{:.1}m", st.config.aim_range),
+        st.config.aim_range,
+        2.5,
+        6.0,
+        0.5,
+        FocusId::AimRangeSlider,
+        focusables,
+    );
+    draw_slider(
+        st,
+        dl,
+        atlas,
+        Rect::new(aim_r.x + 40.0 + aim_third * 2.0, aim_r.y + 104.0, aim_third, 50.0),
+        "Smooth",
+        &format!("{:.0}%", st.config.aim_smooth * 100.0),
+        st.config.aim_smooth,
+        0.15,
+        0.90,
+        0.05,
+        FocusId::AimSmoothSlider,
+        focusables,
+    );
+    y += 192.0;
+
     let simple_rows = [
         (
             "AutoSprint",
-            "Automatically holds sprint while moving forward with W.",
+            "Keeps sprint active whenever you hold forward.",
             st.config.auto_sprint,
             FocusId::AutoSprintToggle,
         ),
         (
             "AutoRespawn",
-            "Instantly respawns when the death screen appears.",
+            "Automatically respawns right away when you die.",
             st.config.auto_respawn,
             FocusId::AutoRespawnToggle,
         ),
         (
             "AutoTotem",
-            "Restocks Totem of Undying into offhand slot when missing.",
+            "Moves a Totem of Undying into your offhand when one is missing.",
             st.config.auto_totem,
             FocusId::AutoTotemToggle,
         ),
         (
             "AutoFish",
-            "Watches fishing bobber dip and reels/recasts automatically.",
+            "Reels in and recasts your fishing rod automatically on a bite.",
             st.config.auto_fish,
             FocusId::AutoFishToggle,
         ),
         (
             "AntiAFK",
-            "Taps sneak periodically when idle for 30s to prevent server kick.",
+            "Occasionally taps sneak when idle so servers do not kick you.",
             st.config.anti_afk,
             FocusId::AntiAfkToggle,
         ),
@@ -980,8 +1167,8 @@ fn render_hud_tab(
             FocusId::HudToggleClock,
         ),
         (
-            "Entity Radar (Wurst7)",
-            "Top-down rotating minimap plotting mobs, players, items, and XP.",
+            "Entity Radar",
+            "Top-down minimap showing yourself, players, hostile mobs, and animals.",
             st.config.hud_radar.enabled,
             FocusId::HudToggleRadar,
         ),
@@ -1305,26 +1492,30 @@ fn render_search_results(
     );
     y += 24.0;
 
-    let items: [(&str, &str, bool, FocusId); 19] = [
-        ("Fullbright", "GPU 16x16 lightmap override", st.config.fullbright_enabled, FocusId::FullbrightToggle),
-        ("Ore X-Ray (3D ESP)", "Highlight Diamond, Debris, Gold, Iron through stone", st.config.xray_ores, FocusId::XrayOresToggle),
-        ("X-Ray Cave Wireframe", "See caves, lava, mineshafts through stone", st.config.xray_terrain, FocusId::XrayTerrainToggle),
-        ("X-Ray Chests & Mobs", "Render chests, players, mobs through walls", st.config.xray_entities, FocusId::XrayEntitiesToggle),
-        ("Entity Radar", "Rotating minimap of nearby mobs, players, items", st.config.hud_radar.enabled, FocusId::HudToggleRadar),
-        ("AutoSprint", "Auto-hold sprint when moving forward", st.config.auto_sprint, FocusId::AutoSprintToggle),
-        ("AutoRespawn", "Auto-respawn on death screen", st.config.auto_respawn, FocusId::AutoRespawnToggle),
-        ("AutoEat", "Auto-eat hotbar food when hungry", st.config.auto_eat, FocusId::AutoEatToggle),
-        ("AutoTotem", "Auto-equip Totem of Undying in offhand", st.config.auto_totem, FocusId::AutoTotemToggle),
-        ("AutoFish", "Auto-reel and recast fishing rod", st.config.auto_fish, FocusId::AutoFishToggle),
-        ("TriggerBot", "Auto-attack entity under crosshair", st.config.trigger_bot, FocusId::TriggerBotToggle),
-        ("AutoClicker", "Auto-click LMB at configured CPS", st.config.auto_clicker, FocusId::AutoClickerToggle),
-        ("AntiAFK", "Periodic sneak pulse while idle", st.config.anti_afk, FocusId::AntiAfkToggle),
-        ("OptiZoom", "Hold key to narrow FOV", st.config.zoom_enabled, FocusId::ZoomToggle),
-        ("Crosshair+", "Custom tactical reticle", st.config.crosshair_enabled, FocusId::CrosshairToggle),
-        ("Coordinates HUD", "XYZ + Nether converter", st.config.hud_coords.enabled, FocusId::HudToggleCoords),
-        ("FPS & Light HUD", "FPS, frametime, 1% low", st.config.hud_fps.enabled, FocusId::HudToggleFps),
-        ("Keystrokes & CPS", "WASD + LMB/RMB CPS", st.config.hud_keystrokes.enabled, FocusId::HudToggleKeystrokes),
-        ("Waypoint Compass", "Directional bearing strip", st.config.hud_compass.enabled, FocusId::HudToggleCompass),
+    let items: [(&str, &str, bool, FocusId); 23] = [
+        ("Fullbright", "Lights up dark caves and night areas", st.config.fullbright_enabled, FocusId::FullbrightToggle),
+        ("Ore X-Ray (3D ESP)", "Spot buried Diamond, Debris, Gold, Iron", st.config.xray_ores, FocusId::XrayOresToggle),
+        ("Cave Wireframe", "See underground tunnels and lava pockets", st.config.xray_terrain, FocusId::XrayTerrainToggle),
+        ("Chest & Mob Through-Walls", "Show chests and mobs behind walls", st.config.xray_entities, FocusId::XrayEntitiesToggle),
+        ("Entity ESP", "Draw boxes around players, mobs, and loot", st.config.esp_enabled, FocusId::EspToggle),
+        ("Tracers", "Draw guide lines to nearby players and mobs", st.config.tracers_enabled, FocusId::TracersToggle),
+        ("Freecam", "Scout freely while your character stays still", st.config.freecam_enabled, FocusId::FreecamToggle),
+        ("AimAssist", "Gently aims toward nearby zombies or players", st.config.aim_assist, FocusId::AimAssistToggle),
+        ("Entity Radar", "Top-down minimap of players and mobs", st.config.hud_radar.enabled, FocusId::HudToggleRadar),
+        ("AutoSprint", "Keeps sprint active while moving forward", st.config.auto_sprint, FocusId::AutoSprintToggle),
+        ("AutoRespawn", "Respawns automatically when you die", st.config.auto_respawn, FocusId::AutoRespawnToggle),
+        ("AutoEat", "Eats hotbar food when hunger gets low", st.config.auto_eat, FocusId::AutoEatToggle),
+        ("AutoTotem", "Equips Totem of Undying into offhand", st.config.auto_totem, FocusId::AutoTotemToggle),
+        ("AutoFish", "Auto-reels and recasts fishing rod", st.config.auto_fish, FocusId::AutoFishToggle),
+        ("TriggerBot", "Strikes the target under your crosshair", st.config.trigger_bot, FocusId::TriggerBotToggle),
+        ("AutoClicker", "Clicks continuously while holding attack", st.config.auto_clicker, FocusId::AutoClickerToggle),
+        ("AntiAFK", "Taps sneak when idle to avoid AFK kick", st.config.anti_afk, FocusId::AntiAfkToggle),
+        ("OptiZoom", "Hold key to zoom in", st.config.zoom_enabled, FocusId::ZoomToggle),
+        ("Crosshair+", "Custom reticle overlay", st.config.crosshair_enabled, FocusId::CrosshairToggle),
+        ("Coordinates HUD", "XYZ and Nether portal coordinates", st.config.hud_coords.enabled, FocusId::HudToggleCoords),
+        ("FPS & Status HUD", "FPS, frame time, and active states", st.config.hud_fps.enabled, FocusId::HudToggleFps),
+        ("Keystrokes & CPS", "Live movement keys and click speed", st.config.hud_keystrokes.enabled, FocusId::HudToggleKeystrokes),
+        ("Waypoint Compass", "Directional compass for saved markers", st.config.hud_compass.enabled, FocusId::HudToggleCompass),
     ];
 
     let mut matched = 0usize;
@@ -1960,6 +2151,18 @@ fn apply_slider_pos(
         FocusId::XrayRadiusSlider => {
             st.config.xray_radius = snapped.round() as i32;
         }
+        FocusId::FreecamSpeedSlider => {
+            st.config.freecam_speed = snapped;
+        }
+        FocusId::AimFovSlider => {
+            st.config.aim_fov = snapped;
+        }
+        FocusId::AimRangeSlider => {
+            st.config.aim_range = snapped;
+        }
+        FocusId::AimSmoothSlider => {
+            st.config.aim_smooth = snapped;
+        }
         FocusId::AutoClickerCpsSlider => {
             st.config.auto_clicker_cps = snapped.round() as u32;
         }
@@ -2001,6 +2204,18 @@ fn nudge_slider(st: &mut AppState, fid: FocusId, delta: f32, min: f32, max: f32)
             let next = (st.config.xray_radius as f32 + delta).clamp(min, max);
             st.config.xray_radius = next.round() as i32;
         }
+        FocusId::FreecamSpeedSlider => {
+            st.config.freecam_speed = (st.config.freecam_speed + delta).clamp(min, max);
+        }
+        FocusId::AimFovSlider => {
+            st.config.aim_fov = (st.config.aim_fov + delta).clamp(min, max);
+        }
+        FocusId::AimRangeSlider => {
+            st.config.aim_range = (st.config.aim_range + delta).clamp(min, max);
+        }
+        FocusId::AimSmoothSlider => {
+            st.config.aim_smooth = (st.config.aim_smooth + delta).clamp(min, max);
+        }
         FocusId::AutoClickerCpsSlider => {
             let next = (st.config.auto_clicker_cps as f32 + delta).clamp(min, max);
             st.config.auto_clicker_cps = next.round() as u32;
@@ -2026,6 +2241,11 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.xray_terrain = false;
             st.config.xray_entities = false;
             st.config.xray_ores = false;
+            st.config.esp_enabled = false;
+            st.config.tracers_enabled = false;
+            st.config.freecam_enabled = false;
+            st.config.aim_assist = false;
+            st.freecam_offset = [0.0; 3];
             st.config.auto_sprint = false;
             st.config.auto_respawn = false;
             st.config.auto_eat = false;
@@ -2093,6 +2313,40 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         }
         FocusId::XrayEntitiesToggle => {
             st.config.xray_entities = !st.config.xray_entities;
+        }
+        FocusId::EspToggle => {
+            st.config.esp_enabled = !st.config.esp_enabled;
+        }
+        FocusId::TracersToggle => {
+            st.config.tracers_enabled = !st.config.tracers_enabled;
+        }
+        FocusId::EspPlayersToggle => {
+            st.config.esp_players = !st.config.esp_players;
+        }
+        FocusId::EspHostileToggle => {
+            st.config.esp_hostile = !st.config.esp_hostile;
+        }
+        FocusId::EspPassiveToggle => {
+            st.config.esp_passive = !st.config.esp_passive;
+        }
+        FocusId::EspItemsToggle => {
+            st.config.esp_items = !st.config.esp_items;
+        }
+        FocusId::FreecamToggle => {
+            st.config.freecam_enabled = !st.config.freecam_enabled;
+            if !st.config.freecam_enabled {
+                st.freecam_offset = [0.0; 3];
+            }
+        }
+        FocusId::AimAssistToggle => {
+            st.config.aim_assist = !st.config.aim_assist;
+        }
+        FocusId::AimTargetCycle => {
+            st.config.aim_target = match st.config.aim_target {
+                AimTarget::Hostile => AimTarget::Players,
+                AimTarget::Players => AimTarget::Both,
+                AimTarget::Both => AimTarget::Hostile,
+            };
         }
         FocusId::XrayKeyCycle => {
             st.config.xray_key = match st.config.xray_key {
@@ -2201,6 +2455,10 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         | FocusId::CrosshairGapSlider
         | FocusId::GammaSlider
         | FocusId::XrayRadiusSlider
+        | FocusId::FreecamSpeedSlider
+        | FocusId::AimFovSlider
+        | FocusId::AimRangeSlider
+        | FocusId::AimSmoothSlider
         | FocusId::AutoEatHungerSlider
         | FocusId::TriggerBotDelaySlider
         | FocusId::AutoClickerCpsSlider => {

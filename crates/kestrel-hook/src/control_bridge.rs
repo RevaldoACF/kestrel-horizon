@@ -13,6 +13,7 @@ pub struct RadarEntity {
     pub label: String,
     pub pos: [f64; 3],
     pub distance: f64,
+    pub health: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +382,7 @@ fn parse_entities(v: &Value, dst: &mut LiveGameState) {
             let kind = e["kind"].as_str().unwrap_or("mob").to_string();
             let ty = e["type"].as_str().unwrap_or("").to_string();
             let dist = e["distance"].as_f64().unwrap_or(0.0);
+            let health = e.get("health").and_then(|x| x.as_f64()).map(|h| h as f32);
             if let Some(arr) = e.get("pos").and_then(|x| x.as_array())
                 && arr.len() >= 3
             {
@@ -393,6 +395,7 @@ fn parse_entities(v: &Value, dst: &mut LiveGameState) {
                         arr[2].as_f64().unwrap_or(0.0),
                     ],
                     distance: dist,
+                    health,
                 });
             }
         }
@@ -411,7 +414,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     let mut saved_fov: Option<u32> = None;
     let mut zoomed_active = false;
 
-    // Wurst7 Automation trackers
+    // Survival & combat helper state
     let mut sprint_held_by_bot = false;
     let mut last_respawn = Instant::now() - Duration::from_secs(5);
     let mut last_eat = Instant::now() - Duration::from_secs(5);
@@ -520,10 +523,17 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             }
         }
 
-        if live_snapshot.in_world
-            && (cfg.hud_radar.enabled || cfg.auto_fish)
-            && last_ent.elapsed() >= Duration::from_millis(200)
-        {
+        let need_entities = cfg.hud_radar.enabled
+            || cfg.auto_fish
+            || cfg.esp_enabled
+            || cfg.tracers_enabled
+            || cfg.aim_assist;
+        let ent_interval = if cfg.aim_assist {
+            Duration::from_millis(85)
+        } else {
+            Duration::from_millis(180)
+        };
+        if live_snapshot.in_world && need_entities && last_ent.elapsed() >= ent_interval {
             last_ent = Instant::now();
             if let Some(v) = send_line(reader, writer, "entities 48") {
                 if v.get("error").is_none() {
@@ -603,7 +613,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         }
 
         // ---------------------------------------------------------
-        // Wurst7 Real Survival Automation Loop
+        // Survival & Combat Helpers
         // ---------------------------------------------------------
         let playing_now = live_snapshot.in_world && live_snapshot.screen == "playing" && !menu_open;
 
@@ -735,6 +745,51 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             }
         }
 
+        // 9. AimAssist
+        if cfg.aim_assist && playing_now && !cfg.freecam_enabled {
+            let mut best: Option<(f32, f32, f32)> = None;
+            let eye = live_snapshot.eye;
+            for e in &live_snapshot.nearby_entities {
+                if e.kind != "mob" || e.distance > f64::from(cfg.aim_range) || e.distance < 0.35 {
+                    continue;
+                }
+                let is_player = e.label == "minecraft:player";
+                let is_hostile = is_hostile_mob_id(&e.label);
+                let allowed = match cfg.aim_target {
+                    crate::config::AimTarget::Players => is_player,
+                    crate::config::AimTarget::Hostile => !is_player && is_hostile,
+                    crate::config::AimTarget::Both => is_player || is_hostile,
+                };
+                if !allowed {
+                    continue;
+                }
+                let dx = e.pos[0] - eye[0];
+                let dy = (e.pos[1] + 1.05) - eye[1];
+                let dz = e.pos[2] - eye[2];
+                let horiz = (dx * dx + dz * dz).sqrt().max(0.001);
+                let target_yaw = (-dx).atan2(dz).to_degrees() as f32;
+                let target_pitch = (-dy).atan2(horiz).to_degrees() as f32;
+                let mut dyaw = (target_yaw - live_snapshot.yaw) % 360.0;
+                if dyaw > 180.0 {
+                    dyaw -= 360.0;
+                }
+                if dyaw < -180.0 {
+                    dyaw += 360.0;
+                }
+                let dpitch = target_pitch - live_snapshot.pitch;
+                let ang = (dyaw * dyaw + dpitch * dpitch).sqrt();
+                if ang <= cfg.aim_fov && ang > 1.2 && best.is_none_or(|b| ang < b.0) {
+                    best = Some((ang, dyaw, dpitch));
+                }
+            }
+            if let Some((_, dyaw, dpitch)) = best {
+                let s = cfg.aim_smooth.clamp(0.12, 0.90);
+                let sy = (dyaw * s).clamp(-22.0, 22.0);
+                let sp = (dpitch * s).clamp(-16.0, 16.0);
+                let _ = send_line(reader, writer, &format!("turn {sy:.2} {sp:.2} --over 0.05"));
+            }
+        }
+
         {
             let mut st = STATE.lock();
             st.game = live_snapshot;
@@ -796,4 +851,49 @@ fn ore_targets_for(
             ],
         }
     }
+}
+
+pub fn is_hostile_mob_id(id: &str) -> bool {
+    let name = id.strip_prefix("minecraft:").unwrap_or(id);
+    matches!(
+        name,
+        "zombie"
+            | "zombie_villager"
+            | "husk"
+            | "drowned"
+            | "skeleton"
+            | "stray"
+            | "bogged"
+            | "wither_skeleton"
+            | "creeper"
+            | "spider"
+            | "cave_spider"
+            | "enderman"
+            | "endermite"
+            | "silverfish"
+            | "witch"
+            | "slime"
+            | "magma_cube"
+            | "blaze"
+            | "ghast"
+            | "phantom"
+            | "pillager"
+            | "vindicator"
+            | "evoker"
+            | "ravager"
+            | "vex"
+            | "warden"
+            | "guardian"
+            | "elder_guardian"
+            | "shulker"
+            | "piglin_brute"
+            | "hoglin"
+            | "zoglin"
+            | "zombified_piglin"
+            | "piglin"
+            | "breeze"
+            | "creaking"
+            | "ender_dragon"
+            | "wither"
+    )
 }

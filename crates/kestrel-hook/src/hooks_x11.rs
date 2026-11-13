@@ -328,6 +328,11 @@ static GRAVE_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
 pub static UI_CAPTURING: AtomicBool = AtomicBool::new(false);
 pub static PASSIVE_KEYS_MASK: AtomicU8 = AtomicU8::new(0);
+pub static FREECAM_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_freecam_active(active: bool) {
+    FREECAM_ACTIVE.store(active, Ordering::Relaxed);
+}
 
 pub fn set_ui_capturing(capturing: bool) {
     UI_CAPTURING.store(capturing, Ordering::Relaxed);
@@ -579,7 +584,7 @@ fn set_mask_bit(bit: u8, on: bool) {
     }
 }
 
-fn handle_key_passive_fast(dpy: *mut Display, keycode: c_uint, pressed: bool) {
+fn handle_key_passive_fast(dpy: *mut Display, keycode: c_uint, pressed: bool) -> bool {
     let fns = resolve_x11();
     let sym = if let Some(k2s) = fns.x_keycode_to_keysym {
         unsafe { k2s(dpy, keycode, 0) }
@@ -592,36 +597,38 @@ fn handle_key_passive_fast(dpy: *mut Display, keycode: c_uint, pressed: bool) {
         sym
     };
 
-    // Zero-lock WASD + Space update!
+    let freecam = FREECAM_ACTIVE.load(Ordering::Relaxed);
     match lower {
         0x77 => {
             set_mask_bit(0, pressed);
-            return;
+            return freecam;
         }
         0x61 => {
             set_mask_bit(1, pressed);
-            return;
+            return freecam;
         }
         0x73 => {
             set_mask_bit(2, pressed);
-            return;
+            return freecam;
         }
         0x64 => {
             set_mask_bit(3, pressed);
-            return;
+            return freecam;
         }
         XK_SPACE => {
             set_mask_bit(4, pressed);
-            return;
+            return freecam;
+        }
+        _ if sym == XK_SHIFT_L || sym == XK_SHIFT_R => {
+            set_mask_bit(7, pressed);
+            return freecam;
         }
         _ => {}
     }
 
-    // Only check Zoom / X-Ray hotkeys when those specific keys are pressed/released
     if !matches!(lower, 0x63 | 0x76 | 0x78 | 0x62) && sym != XK_ALT_L && sym != XK_ALT_R {
-        return;
+        return false;
     }
-
     let mut zoom_change: Option<(bool, u32)> = None;
     {
         let mut st = STATE.lock();
@@ -655,6 +662,7 @@ fn handle_key_passive_fast(dpy: *mut Display, keycode: c_uint, pressed: bool) {
     if let Some((active, fov)) = zoom_change {
         send_cmd(ControlCmd::SetZoom(active, fov));
     }
+    false
 }
 
 fn handle_mouse_button_passive(detail: c_uint, pressed: bool) {
@@ -790,7 +798,9 @@ pub unsafe extern "C" fn hook_XCheckIfEvent(
                 handle_key_in_ui(sym, pressed, &text);
                 continue;
             } else {
-                handle_key_passive_fast(display, keycode, pressed);
+                if handle_key_passive_fast(display, keycode, pressed) {
+                    continue;
+                }
                 return 1;
             }
         }

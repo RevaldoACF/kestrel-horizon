@@ -270,6 +270,7 @@ impl DrawList {
 
     pub fn text(&mut self, atlas: &FontAtlas, kind: FontKind, x: f32, y: f32, text: &str, color: Color) {
         let baseline = y + atlas.ascent(kind);
+
         let mut pen_x = x;
         for ch in text.chars() {
             let Some(g) = atlas.glyph(kind, ch) else {
@@ -291,6 +292,58 @@ impl DrawList {
                 );
             }
             pen_x += g.advance;
+        }
+    }
+
+    pub fn line(&mut self, p0: [f32; 2], p1: [f32; 2], thickness: f32, color: Color) {
+        let dx = p1[0] - p0[0];
+        let dy = p1[1] - p0[1];
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.5 {
+            return;
+        }
+        let scissor = self.current_scissor();
+        if scissor[2] <= 0 || scissor[3] <= 0 {
+            return;
+        }
+        let nx = -dy / len * (thickness * 0.5);
+        let ny = dx / len * (thickness * 0.5);
+
+        let base = self.vertices.len() as u32;
+        let uv = [50.0, 50.0];
+        let rect_size = [100.0, 100.0];
+        let border_color = [0.0; 4];
+        let params = [0.0, 0.0, 0.0, 0.0];
+
+        for [x, y] in [
+            [p0[0] - nx, p0[1] - ny],
+            [p1[0] - nx, p1[1] - ny],
+            [p1[0] + nx, p1[1] + ny],
+            [p0[0] + nx, p0[1] + ny],
+        ] {
+            self.vertices.push(UiVertex {
+                pos: [x, y],
+                uv,
+                rect_size,
+                color: color.0,
+                border_color,
+                params,
+            });
+        }
+        let idx_start = self.indices.len() as u32;
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        if let Some(last) = self.batches.last_mut()
+            && last.scissor == scissor
+            && last.index_offset + last.index_count == idx_start
+        {
+            last.index_count += 6;
+        } else {
+            self.batches.push(DrawBatch {
+                index_offset: idx_start,
+                index_count: 6,
+                scissor,
+            });
         }
     }
 

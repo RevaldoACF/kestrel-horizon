@@ -64,6 +64,19 @@ pub enum FocusId {
     XrayOresToggle,
     XrayOrePresetCycle,
     XrayRadiusSlider,
+    EspToggle,
+    TracersToggle,
+    EspPlayersToggle,
+    EspHostileToggle,
+    EspPassiveToggle,
+    EspItemsToggle,
+    FreecamToggle,
+    FreecamSpeedSlider,
+    AimAssistToggle,
+    AimTargetCycle,
+    AimFovSlider,
+    AimRangeSlider,
+    AimSmoothSlider,
     FullbrightToggle,
     FullbrightModeMax,
     FullbrightModeSoft,
@@ -158,6 +171,8 @@ pub struct AppState {
     pub lightmap_images_seen: usize,
     pub lightmap_dirty: bool,
 
+    pub freecam_offset: [f32; 3],
+    pub last_freecam_step: Instant,
     // UI feedback / animation
     pub session_start: Instant,
     pub menu_anim: f32,
@@ -218,6 +233,8 @@ impl AppState {
             lightmap_dirty: false,
 
             session_start: now,
+            freecam_offset: [0.0; 3],
+            last_freecam_step: now,
             menu_anim: 0.0,
             toast: None,
 

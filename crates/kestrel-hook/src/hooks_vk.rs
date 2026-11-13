@@ -43,12 +43,31 @@ static XRAY_TERRAIN_ON: AtomicBool = AtomicBool::new(false);
 static XRAY_ENTITIES_ON: AtomicBool = AtomicBool::new(false);
 static LIGHTMAP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-static XRAY_ORES_ON: AtomicBool = AtomicBool::new(false);
+use std::sync::atomic::AtomicU32;
 
-pub fn sync_xray_flags(terrain: bool, entities: bool, ores: bool) {
+static XRAY_ORES_ON: AtomicBool = AtomicBool::new(false);
+static ESP_OR_TRACERS_ON: AtomicBool = AtomicBool::new(false);
+static FREECAM_ON: AtomicBool = AtomicBool::new(false);
+static FREECAM_OX: AtomicU32 = AtomicU32::new(0);
+static FREECAM_OY: AtomicU32 = AtomicU32::new(0);
+static FREECAM_OZ: AtomicU32 = AtomicU32::new(0);
+
+pub fn sync_xray_flags(
+    terrain: bool,
+    entities: bool,
+    ores: bool,
+    esp_or_tracers: bool,
+    freecam: bool,
+    offset: [f32; 3],
+) {
     XRAY_TERRAIN_ON.store(terrain, Ordering::Relaxed);
     XRAY_ENTITIES_ON.store(entities, Ordering::Relaxed);
     XRAY_ORES_ON.store(ores, Ordering::Relaxed);
+    ESP_OR_TRACERS_ON.store(esp_or_tracers, Ordering::Relaxed);
+    FREECAM_ON.store(freecam, Ordering::Relaxed);
+    FREECAM_OX.store(offset[0].to_bits(), Ordering::Relaxed);
+    FREECAM_OY.store(offset[1].to_bits(), Ordering::Relaxed);
+    FREECAM_OZ.store(offset[2].to_bits(), Ordering::Relaxed);
 }
 
 static LATEST_VIEW_PROJ: LazyLock<RwLock<Option<[[f32; 4]; 4]>>> =
@@ -675,7 +694,10 @@ unsafe extern "system" fn hook_vkCmdCopyBuffer(
     region_count: u32,
     p_regions: *const vk::BufferCopy,
 ) {
-    if XRAY_ORES_ON.load(Ordering::Relaxed) && region_count > 0 && !p_regions.is_null() {
+    let need_vp = XRAY_ORES_ON.load(Ordering::Relaxed)
+        || ESP_OR_TRACERS_ON.load(Ordering::Relaxed)
+        || FREECAM_ON.load(Ordering::Relaxed);
+    if need_vp && region_count > 0 && !p_regions.is_null() {
         let regions = unsafe { std::slice::from_raw_parts(p_regions, region_count as usize) };
         let vk_st = VK.lock();
         if vk_st.globals_buffers.contains(&dst_buffer.as_raw()) {
@@ -691,6 +713,17 @@ unsafe extern "system" fn hook_vkCmdCopyBuffer(
                     let mut mat = [[0.0f32; 4]; 4];
                     unsafe {
                         ptr::copy_nonoverlapping(src_ptr, mat.as_mut_ptr() as *mut u8, 64);
+                    }
+                    if FREECAM_ON.load(Ordering::Relaxed) {
+                        let ox = f32::from_bits(FREECAM_OX.load(Ordering::Relaxed));
+                        let oy = f32::from_bits(FREECAM_OY.load(Ordering::Relaxed));
+                        let oz = f32::from_bits(FREECAM_OZ.load(Ordering::Relaxed));
+                        for r in 0..4 {
+                            mat[3][r] -= mat[0][r] * ox + mat[1][r] * oy + mat[2][r] * oz;
+                        }
+                        unsafe {
+                            ptr::copy_nonoverlapping(mat.as_ptr() as *const u8, src_ptr, 64);
+                        }
                     }
                     *LATEST_VIEW_PROJ.write() = Some(mat);
                 }
