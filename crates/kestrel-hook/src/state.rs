@@ -78,6 +78,7 @@ pub enum FocusId {
     AimFovSlider,
     AimRangeSlider,
     AimSmoothSlider,
+    CriticalsToggle,
     FullbrightToggle,
     FullbrightModeMax,
     FullbrightModeSoft,

@@ -1,3 +1,4 @@
+use crate::hooks_x11::set_crit_intercept;
 use crate::state::STATE;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
@@ -81,6 +82,7 @@ pub struct LiveGameState {
     pub thundering: bool,
     pub sprinting: bool,
     pub sneaking: bool,
+    pub on_ground: bool,
     pub held_item: Option<String>,
     pub held_raw: Option<String>,
     pub held_damage: i32,
@@ -105,6 +107,7 @@ pub struct LiveGameState {
 pub enum ControlCmd {
     SetZoom(bool, u32),
     SetGamma(f32),
+    CritAttack,
 }
 
 static CMD_TX: OnceLock<Sender<ControlCmd>> = OnceLock::new();
@@ -255,6 +258,7 @@ fn parse_state(v: &Value, dst: &mut LiveGameState) {
             .unwrap_or(0) as i32;
         dst.sprinting = p.get("sprinting").and_then(|x| x.as_bool()).unwrap_or(false);
         dst.sneaking = p.get("sneaking").and_then(|x| x.as_bool()).unwrap_or(false);
+        dst.on_ground = p.get("on_ground").and_then(|x| x.as_bool()).unwrap_or(true);
 
         dst.effects.clear();
         if let Some(effs) = p.get("effects").and_then(|x| x.as_array()) {
@@ -412,6 +416,10 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     let mut ore_scan_idx: usize = 0;
     let mut ore_cache: std::collections::HashMap<String, Vec<OreMarker>> =
         std::collections::HashMap::new();
+    let mut last_ore_scan_pos: Option<[f64; 3]> = None;
+    let mut last_ore_full_at = Instant::now() - Duration::from_secs(10);
+    let mut last_chest_scan_pos: Option<[f64; 3]> = None;
+    let mut last_chest_full_at = Instant::now() - Duration::from_secs(10);
     let mut last_chests = Instant::now() - Duration::from_secs(5);
     let mut chest_scan_idx: usize = 0;
     let mut chest_cache: std::collections::HashMap<String, Vec<OreMarker>> =
@@ -491,6 +499,18 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                     let mut st = STATE.lock();
                     st.game.horizon_gamma = Some(clamped);
                 }
+                ControlCmd::CritAttack => {
+                    let mut was_sprint = false;
+                    let mut on_ground = true;
+                    if let Some(v) = send_line(reader, writer, "state") {
+                        was_sprint = v["player"]["sprinting"].as_bool().unwrap_or(false);
+                        on_ground = v["player"]["on_ground"].as_bool().unwrap_or(true);
+                    } else {
+                        disconnected = true;
+                        break;
+                    }
+                    perform_crit_attack(reader, writer, on_ground, was_sprint);
+                }
             }
         }
 
@@ -517,7 +537,8 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             continue;
         }
 
-        if live_snapshot.in_world && last_inv.elapsed() >= Duration::from_millis(400) {
+        let need_inv = cfg.hud_vitals.enabled || cfg.auto_totem || cfg.auto_eat;
+        if live_snapshot.in_world && need_inv && last_inv.elapsed() >= Duration::from_millis(800) {
             last_inv = Instant::now();
             if let Some(v) = send_line(reader, writer, "inventory") {
                 if v.get("error").is_none() {
@@ -535,9 +556,9 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             || cfg.tracers_enabled
             || cfg.aim_assist;
         let ent_interval = if cfg.aim_assist {
-            Duration::from_millis(85)
+            Duration::from_millis(105)
         } else {
-            Duration::from_millis(180)
+            Duration::from_millis(220)
         };
         if live_snapshot.in_world && need_entities && last_ent.elapsed() >= ent_interval {
             last_ent = Instant::now();
@@ -560,22 +581,26 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         }
 
         if live_snapshot.in_world && cfg.xray_ores {
-            if last_ores.elapsed() >= Duration::from_millis(140) {
+            let moved_far = last_ore_scan_pos
+                .is_none_or(|p| dist3(p, live_snapshot.eye) >= 2.5);
+            let need_refresh = moved_far || last_ore_full_at.elapsed() >= Duration::from_millis(2500);
+            let interval = if live_snapshot.ore_markers.is_empty() { 150 } else { 260 };
+            if need_refresh && last_ores.elapsed() >= Duration::from_millis(interval) {
                 last_ores = Instant::now();
                 let targets = ore_targets_for(&live_snapshot.dimension, cfg.xray_ore_preset);
-                let rad = cfg.xray_radius.clamp(12, 48);
+                let rad = cfg.xray_radius.clamp(12, 36);
                 let mut lost_conn = false;
-                let batch = if live_snapshot.ore_markers.is_empty() { 4 } else { 2 };
-                for _ in 0..batch {
-                    if targets.is_empty() {
-                        break;
-                    }
+                if !targets.is_empty() {
                     let (block_id, kind) = targets[ore_scan_idx % targets.len()];
                     ore_scan_idx = ore_scan_idx.wrapping_add(1);
+                    if ore_scan_idx.is_multiple_of(targets.len()) {
+                        last_ore_scan_pos = Some(live_snapshot.eye);
+                        last_ore_full_at = Instant::now();
+                    }
                     if let Some(v) = send_line(reader, writer, &format!("find-block {block_id} {rad}")) {
                         let mut list = Vec::new();
                         if let Some(arr) = v.get("nearest").and_then(|x| x.as_array()) {
-                            for item in arr {
+                            for item in arr.iter().take(12) {
                                 if let Some(p) = item.get("pos").and_then(|x| x.as_array())
                                     && p.len() >= 3
                                 {
@@ -595,7 +620,6 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                         ore_cache.insert(block_id.to_string(), list);
                     } else {
                         lost_conn = true;
-                        break;
                     }
                 }
                 if lost_conn {
@@ -610,65 +634,67 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                     .filter(|m| m.distance <= max_d)
                     .collect();
                 merged.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-                merged.truncate(64);
+                merged.truncate(24);
                 live_snapshot.ore_markers = merged;
             }
         } else if !live_snapshot.ore_markers.is_empty() {
             live_snapshot.ore_markers.clear();
             ore_cache.clear();
+            last_ore_scan_pos = None;
         }
 
         if live_snapshot.in_world && cfg.esp_enabled && cfg.esp_chests {
-            if last_chests.elapsed() >= Duration::from_millis(240) {
+            let moved_far = last_chest_scan_pos
+                .is_none_or(|p| dist3(p, live_snapshot.eye) >= 3.0);
+            let need_refresh = moved_far || last_chest_full_at.elapsed() >= Duration::from_millis(3000);
+            if need_refresh && last_chests.elapsed() >= Duration::from_millis(340) {
                 last_chests = Instant::now();
                 let targets = storage_targets();
-                let rad = 32;
-                let mut lost_conn = false;
-                for _ in 0..2 {
-                    let (block_id, kind) = targets[chest_scan_idx % targets.len()];
-                    chest_scan_idx = chest_scan_idx.wrapping_add(1);
-                    if let Some(v) = send_line(reader, writer, &format!("find-block {block_id} {rad}")) {
-                        let mut list = Vec::new();
-                        if let Some(arr) = v.get("nearest").and_then(|x| x.as_array()) {
-                            for item in arr {
-                                if let Some(p) = item.get("pos").and_then(|x| x.as_array())
-                                    && p.len() >= 3
-                                {
-                                    let pos = [
-                                        p[0].as_i64().unwrap_or(0) as i32,
-                                        p[1].as_i64().unwrap_or(0) as i32,
-                                        p[2].as_i64().unwrap_or(0) as i32,
-                                    ];
-                                    let d = dist3(
-                                        live_snapshot.eye,
-                                        [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
-                                    );
-                                    list.push(OreMarker { pos, kind, distance: d });
-                                }
+                let rad = 28;
+                let (block_id, kind) = targets[chest_scan_idx % targets.len()];
+                chest_scan_idx = chest_scan_idx.wrapping_add(1);
+                if chest_scan_idx.is_multiple_of(targets.len()) {
+                    last_chest_scan_pos = Some(live_snapshot.eye);
+                    last_chest_full_at = Instant::now();
+                }
+                if let Some(v) = send_line(reader, writer, &format!("find-block {block_id} {rad}")) {
+                    let mut list = Vec::new();
+                    if let Some(arr) = v.get("nearest").and_then(|x| x.as_array()) {
+                        for item in arr.iter().take(10) {
+                            if let Some(p) = item.get("pos").and_then(|x| x.as_array())
+                                && p.len() >= 3
+                            {
+                                let pos = [
+                                    p[0].as_i64().unwrap_or(0) as i32,
+                                    p[1].as_i64().unwrap_or(0) as i32,
+                                    p[2].as_i64().unwrap_or(0) as i32,
+                                ];
+                                let d = dist3(
+                                    live_snapshot.eye,
+                                    [pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5],
+                                );
+                                list.push(OreMarker { pos, kind, distance: d });
                             }
                         }
-                        chest_cache.insert(block_id.to_string(), list);
-                    } else {
-                        lost_conn = true;
-                        break;
                     }
-                }
-                if lost_conn {
+                    chest_cache.insert(block_id.to_string(), list);
+                } else {
                     conn = None;
                     continue;
                 }
                 let mut merged: Vec<OreMarker> = chest_cache
                     .values()
                     .flat_map(|v| v.iter().copied())
-                    .filter(|m| m.distance <= 38.0)
+                    .filter(|m| m.distance <= 34.0)
                     .collect();
                 merged.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-                merged.truncate(48);
+                merged.truncate(16);
                 live_snapshot.chest_markers = merged;
             }
         } else if !live_snapshot.chest_markers.is_empty() {
             live_snapshot.chest_markers.clear();
             chest_cache.clear();
+            last_chest_scan_pos = None;
         }
 
         if last_opts.elapsed() >= Duration::from_secs(3) {
@@ -689,6 +715,13 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         // Survival & Combat Helpers
         // ---------------------------------------------------------
         let playing_now = live_snapshot.in_world && live_snapshot.screen == "playing" && !menu_open;
+        set_crit_intercept(
+            cfg.criticals_enabled
+                && playing_now
+                && live_snapshot.on_ground
+                && live_snapshot.looking_at_kind == "entity"
+                && live_snapshot.looking_at_dist <= 3.5,
+        );
 
         // 1. AutoRespawn
         if cfg.auto_respawn
@@ -786,7 +819,11 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             && last_trigger.elapsed() >= Duration::from_millis(cfg.trigger_bot_delay_ms as u64)
         {
             last_trigger = Instant::now();
-            let _ = send_line(reader, writer, "mouse left click");
+            if cfg.criticals_enabled && live_snapshot.on_ground {
+                perform_crit_attack(reader, writer, true, live_snapshot.sprinting);
+            } else {
+                let _ = send_line(reader, writer, "mouse left click");
+            }
         }
 
         // 7. AutoClicker
@@ -868,10 +905,51 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             st.game = live_snapshot;
         }
 
-        std::thread::sleep(Duration::from_millis(130));
+        let sleep_ms = if cfg.aim_assist || cfg.trigger_bot || cfg.auto_clicker {
+            85
+        } else {
+            160
+        };
+        std::thread::sleep(Duration::from_millis(sleep_ms));
     }
 }
 
+
+fn perform_crit_attack(
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut UnixStream,
+    on_ground: bool,
+    was_sprinting: bool,
+) {
+    if !on_ground {
+        if was_sprinting {
+            let _ = send_line(reader, writer, "key ctrl up");
+        }
+        let _ = send_line(reader, writer, "mouse left click");
+        return;
+    }
+    if was_sprinting {
+        let _ = send_line(reader, writer, "key ctrl up");
+    }
+    let _ = send_line(reader, writer, "key space down");
+    std::thread::sleep(Duration::from_millis(45));
+    let _ = send_line(reader, writer, "key space up");
+
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(380) {
+        std::thread::sleep(Duration::from_millis(30));
+        if let Some(v) = send_line(reader, writer, "state") {
+            let og = v["player"]["on_ground"].as_bool().unwrap_or(true);
+            let vy = v["player"]["velocity"][1].as_f64().unwrap_or(0.0);
+            if !og && vy < -0.015 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    let _ = send_line(reader, writer, "mouse left click");
+}
 fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];

@@ -656,7 +656,7 @@ fn render_survival_tab(
         &format!("{} blocks", st.config.xray_radius),
         st.config.xray_radius as f32,
         12.0,
-        48.0,
+        36.0,
         4.0,
         FocusId::XrayRadiusSlider,
         focusables,
@@ -909,6 +909,34 @@ fn render_automation_tab(
         focusables,
     );
     y += 192.0;
+    let crit_r = Rect::new(x, y, w, 58.0);
+    dl.rect_border(crit_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(
+        atlas,
+        FontKind::UiSemi,
+        crit_r.x + 16.0,
+        crit_r.y + 10.0,
+        "Criticals",
+        palette::TEXT_PRIMARY,
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        crit_r.x + 16.0,
+        crit_r.y + 30.0,
+        "Triggers a micro-jump when attacking so hits land while falling for 1.5x critical damage.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(crit_r.x + w - 82.0, crit_r.y + 15.0, 66.0, 28.0),
+        st.config.criticals_enabled,
+        FocusId::CriticalsToggle,
+        focusables,
+    );
+    y += 68.0;
 
     let simple_rows = [
         (
@@ -1493,7 +1521,7 @@ fn render_search_results(
     );
     y += 24.0;
 
-    let items: [(&str, &str, bool, FocusId); 23] = [
+    let items: [(&str, &str, bool, FocusId); 24] = [
         ("Fullbright", "Lights up dark caves and night areas", st.config.fullbright_enabled, FocusId::FullbrightToggle),
         ("Ore X-Ray (3D ESP)", "Spot buried Diamond, Debris, Gold, Iron", st.config.xray_ores, FocusId::XrayOresToggle),
         ("Cave Wireframe", "See underground tunnels and lava pockets", st.config.xray_terrain, FocusId::XrayTerrainToggle),
@@ -1502,6 +1530,7 @@ fn render_search_results(
         ("Tracers", "Draw guide lines to nearby players and mobs", st.config.tracers_enabled, FocusId::TracersToggle),
         ("Freecam", "Scout freely while your character stays still", st.config.freecam_enabled, FocusId::FreecamToggle),
         ("AimAssist", "Gently aims toward nearby zombies or players", st.config.aim_assist, FocusId::AimAssistToggle),
+        ("Criticals", "Micro-jump on attack for 1.5x critical hits", st.config.criticals_enabled, FocusId::CriticalsToggle),
         ("Entity Radar", "Top-down minimap of players and mobs", st.config.hud_radar.enabled, FocusId::HudToggleRadar),
         ("AutoSprint", "Keeps sprint active while moving forward", st.config.auto_sprint, FocusId::AutoSprintToggle),
         ("AutoRespawn", "Respawns automatically when you die", st.config.auto_respawn, FocusId::AutoRespawnToggle),
@@ -2245,6 +2274,7 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.esp_enabled = false;
             st.config.esp_chests = false;
             st.config.tracers_enabled = false;
+            st.config.criticals_enabled = false;
             st.config.freecam_enabled = false;
             st.config.aim_assist = false;
             st.freecam_offset = [0.0; 3];
@@ -2342,6 +2372,9 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             if !st.config.freecam_enabled {
                 st.freecam_offset = [0.0; 3];
             }
+        }
+        FocusId::CriticalsToggle => {
+            st.config.criticals_enabled = !st.config.criticals_enabled;
         }
         FocusId::AimAssistToggle => {
             st.config.aim_assist = !st.config.aim_assist;

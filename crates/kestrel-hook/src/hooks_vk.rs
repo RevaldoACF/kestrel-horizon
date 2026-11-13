@@ -699,33 +699,38 @@ unsafe extern "system" fn hook_vkCmdCopyBuffer(
         || FREECAM_ON.load(Ordering::Relaxed);
     if need_vp && region_count > 0 && !p_regions.is_null() {
         let regions = unsafe { std::slice::from_raw_parts(p_regions, region_count as usize) };
-        let vk_st = VK.lock();
-        if vk_st.globals_buffers.contains(&dst_buffer.as_raw()) {
-            for reg in regions {
-                if reg.dst_offset == 0
-                    && reg.size >= 64
-                    && let Some(binding) = vk_st.buffer_bindings.get(&src_buffer.as_raw()).copied()
-                    && let Some(&base_ptr) = vk_st.mapped_memory.get(&binding.memory)
-                {
-                    let src_ptr = unsafe {
-                        base_ptr.add(binding.offset as usize + reg.src_offset as usize)
-                    };
-                    let mut mat = [[0.0f32; 4]; 4];
-                    unsafe {
-                        ptr::copy_nonoverlapping(src_ptr, mat.as_mut_ptr() as *mut u8, 64);
-                    }
-                    if FREECAM_ON.load(Ordering::Relaxed) {
-                        let ox = f32::from_bits(FREECAM_OX.load(Ordering::Relaxed));
-                        let oy = f32::from_bits(FREECAM_OY.load(Ordering::Relaxed));
-                        let oz = f32::from_bits(FREECAM_OZ.load(Ordering::Relaxed));
-                        for r in 0..4 {
-                            mat[3][r] -= mat[0][r] * ox + mat[1][r] * oy + mat[2][r] * oz;
-                        }
+        let has_globals_copy = regions
+            .iter()
+            .any(|r| r.dst_offset == 0 && (3500..=4600).contains(&r.size));
+        if has_globals_copy {
+            let vk_st = VK.lock();
+            if vk_st.globals_buffers.contains(&dst_buffer.as_raw()) {
+                for reg in regions {
+                    if reg.dst_offset == 0
+                        && (3500..=4600).contains(&reg.size)
+                        && let Some(binding) = vk_st.buffer_bindings.get(&src_buffer.as_raw()).copied()
+                        && let Some(&base_ptr) = vk_st.mapped_memory.get(&binding.memory)
+                    {
+                        let src_ptr = unsafe {
+                            base_ptr.add(binding.offset as usize + reg.src_offset as usize)
+                        };
+                        let mut mat = [[0.0f32; 4]; 4];
                         unsafe {
-                            ptr::copy_nonoverlapping(mat.as_ptr() as *const u8, src_ptr, 64);
+                            ptr::copy_nonoverlapping(src_ptr, mat.as_mut_ptr() as *mut u8, 64);
                         }
+                        if FREECAM_ON.load(Ordering::Relaxed) {
+                            let ox = f32::from_bits(FREECAM_OX.load(Ordering::Relaxed));
+                            let oy = f32::from_bits(FREECAM_OY.load(Ordering::Relaxed));
+                            let oz = f32::from_bits(FREECAM_OZ.load(Ordering::Relaxed));
+                            for r in 0..4 {
+                                mat[3][r] -= mat[0][r] * ox + mat[1][r] * oy + mat[2][r] * oz;
+                            }
+                            unsafe {
+                                ptr::copy_nonoverlapping(mat.as_ptr() as *const u8, src_ptr, 64);
+                            }
+                        }
+                        *LATEST_VIEW_PROJ.write() = Some(mat);
                     }
-                    *LATEST_VIEW_PROJ.write() = Some(mat);
                 }
             }
         }

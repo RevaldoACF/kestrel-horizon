@@ -333,6 +333,11 @@ pub static FREECAM_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub fn set_freecam_active(active: bool) {
     FREECAM_ACTIVE.store(active, Ordering::Relaxed);
 }
+pub static CRIT_INTERCEPT_LMB: AtomicBool = AtomicBool::new(false);
+
+pub fn set_crit_intercept(on: bool) {
+    CRIT_INTERCEPT_LMB.store(on, Ordering::Relaxed);
+}
 
 pub fn set_ui_capturing(capturing: bool) {
     UI_CAPTURING.store(capturing, Ordering::Relaxed);
@@ -884,11 +889,22 @@ pub unsafe extern "C" fn hook_XGetEventData(
     };
     let ok = unsafe { real(display, cookie) };
     if ok != 0 && !cookie.is_null() && !ui_capturing() {
-        let c = unsafe { &*cookie };
+        let c = unsafe { &mut *cookie };
         if !c.data.is_null() && (c.evtype == XI_BUTTON_PRESS || c.evtype == XI_BUTTON_RELEASE) {
             let dev = unsafe { &*(c.data as *const XIDeviceEvent) };
             if dev.event != 0 {
                 LAST_WINDOW.store(dev.event as usize, Ordering::Relaxed);
+            }
+            if c.evtype == XI_BUTTON_PRESS
+                && dev.detail == 1
+                && CRIT_INTERCEPT_LMB.load(Ordering::Relaxed)
+            {
+                if let Some(free_data) = resolve_x11().x_free_event_data {
+                    unsafe { free_data(display, cookie) };
+                }
+                handle_mouse_button_passive(1, true);
+                send_cmd(ControlCmd::CritAttack);
+                return 0;
             }
             handle_mouse_button_passive(dev.detail as c_uint, c.evtype == XI_BUTTON_PRESS);
         }

@@ -14,7 +14,7 @@ In-process Vulkan + X11 survival client (`libkestrel.so` + `kestrel-inject`) for
   - **Entity ESP & Tracers**: Color-coded 3D boxes and guide lines for Players (yellow), Hostile Mobs (red), Passive Mobs (green), and Items.
   - **Freecam**: Fly the camera through walls to scout while your character stays safely in place.
 - **Combat & Survival Helpers**:
-  - **AimAssist** (configurable target filter, FOV, range, and smoothness), **TriggerBot**, **AutoClicker**, **AutoSprint**, **AutoRespawn**, **AutoEat**, **AutoTotem**, **AutoFish**, and **AntiAFK**.
+  - **AimAssist** (configurable target filter, FOV, range, and smoothness), **Criticals** (micro-jump critical hits), **TriggerBot**, **AutoClicker**, **AutoSprint**, **AutoRespawn**, **AutoEat**, **AutoTotem**, **AutoFish**, and **AntiAFK**.
 - **Survival HUD & Layout Editor**:
   - Draggable **Entity Radar** (White: You, Yellow: Players, Red: Hostile, Green: Non-Hostile), **Coordinates + Nether Converter**, **FPS / 1% Low**, **Keystrokes + CPS**, **Vitals & Totems**, **Waypoint Compass**, **Session Clock**, and **Crosshair+**.
 Push to `main` or trigger the **Build Kestrel Horizon Client** workflow in `.github/workflows/build.yml` to build `libkestrel.so` and `kestrel-inject` on `ubuntu-latest` and download the `kestrel-horizon-linux-x86_64` artifact.

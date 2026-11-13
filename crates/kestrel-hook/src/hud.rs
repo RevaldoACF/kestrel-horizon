@@ -64,10 +64,10 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
 
     // 3D Ore X-Ray ESP boxes (when inside world)
     if st.config.xray_ores && st.game.in_world {
-        draw_block_markers(st, dl, atlas, sw, sh, &st.game.ore_markers, 32.0);
+        draw_block_markers(st, dl, atlas, sw, sh, &st.game.ore_markers, 24.0, 24);
     }
     if st.config.esp_enabled && st.config.esp_chests && st.game.in_world {
-        draw_block_markers(st, dl, atlas, sw, sh, &st.game.chest_markers, 36.0);
+        draw_block_markers(st, dl, atlas, sw, sh, &st.game.chest_markers, 28.0, 16);
     }
     if (st.config.esp_enabled || st.config.tracers_enabled) && st.game.in_world {
         draw_entity_esp_and_tracers(st, dl, atlas, sw, sh);
@@ -1055,7 +1055,9 @@ fn draw_block_markers(
     sh: f32,
     markers: &[crate::control_bridge::OreMarker],
     label_dist: f64,
+    max_count: usize,
 ) {
+    use std::fmt::Write;
     if markers.is_empty() {
         return;
     }
@@ -1065,8 +1067,9 @@ fn draw_block_markers(
         st.game.eye[1] + f64::from(st.freecam_offset[1]),
         st.game.eye[2] + f64::from(st.freecam_offset[2]),
     ];
+    let mut tag = String::with_capacity(32);
 
-    for marker in markers.iter().take(48) {
+    for marker in markers.iter().take(max_count) {
         let bx = marker.pos[0] as f64 - eye[0];
         let by = marker.pos[1] as f64 - eye[1];
         let bz = marker.pos[2] as f64 - eye[2];
@@ -1112,7 +1115,8 @@ fn draw_block_markers(
         );
 
         if marker.distance <= label_dist {
-            let tag = format!("{} {:.0}m", marker.kind.short_label(), marker.distance);
+            tag.clear();
+            let _ = write!(tag, "{} {:.0}m", marker.kind.short_label(), marker.distance);
             let tw = atlas.measure(FontKind::MonoSmall, &tag) + 8.0;
             let tx = x0 + (w - tw) * 0.5;
             let ty = (y0 - 16.0).max(4.0);
@@ -1129,6 +1133,7 @@ fn draw_entity_esp_and_tracers(
     sw: f32,
     sh: f32,
 ) {
+    use std::fmt::Write;
     let vp = active_view_proj(st, sw, sh);
     if st.game.nearby_entities.is_empty() {
         return;
@@ -1139,8 +1144,13 @@ fn draw_entity_esp_and_tracers(
         st.game.eye[2] + f64::from(st.freecam_offset[2]),
     ];
     let origin = [sw * 0.5, sh * 0.5];
+    let mut tag = String::with_capacity(48);
+    let mut drawn = 0usize;
 
     for e in &st.game.nearby_entities {
+        if drawn >= 24 {
+            break;
+        }
         let is_player = e.label == "minecraft:player";
         let is_item = e.kind == "item";
         let is_orb = e.kind == "orb";
@@ -1238,17 +1248,15 @@ fn draw_entity_esp_and_tracers(
                 col.with_alpha(0.95),
             );
 
-            if e.distance <= 40.0 {
-                let clean = e
-                    .label
-                    .strip_prefix("minecraft:")
-                    .unwrap_or(&e.label)
-                    .replace('_', " ");
-                let tag = if let Some(hp) = e.health {
-                    format!("{clean} {:.0}hp · {:.0}m", hp, e.distance)
+            drawn += 1;
+            if e.distance <= 30.0 {
+                tag.clear();
+                let clean = e.label.strip_prefix("minecraft:").unwrap_or(&e.label);
+                if let Some(hp) = e.health {
+                    let _ = write!(tag, "{clean} {:.0}hp {:.0}m", hp, e.distance);
                 } else {
-                    format!("{clean} {:.0}m", e.distance)
-                };
+                    let _ = write!(tag, "{clean} {:.0}m", e.distance);
+                }
                 let tw = atlas.measure(FontKind::MonoSmall, &tag) + 8.0;
                 let tx = x0 + (bw - tw) * 0.5;
                 let ty = (y0 - 16.0).max(4.0);

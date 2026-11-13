@@ -143,6 +143,7 @@ pub struct KestrelConfig {
     pub aim_fov: f32,
     pub aim_range: f32,
     pub aim_smooth: f32,
+    pub criticals_enabled: bool,
 
 
     pub zoom_enabled: bool,
@@ -188,7 +189,7 @@ impl Default for KestrelConfig {
             xray_key: XrayKey::X,
             xray_ores: false,
             xray_ore_preset: OrePreset::Valuable,
-            xray_radius: 28,
+            xray_radius: 20,
             esp_enabled: false,
             tracers_enabled: false,
             esp_players: true,
@@ -205,6 +206,7 @@ impl Default for KestrelConfig {
             aim_fov: 70.0,
             aim_range: 4.5,
             aim_smooth: 0.45,
+            criticals_enabled: false,
 
 
             fullbright_strength: 1.0,
