@@ -42,6 +42,7 @@ struct SwapchainResources {
     images: Vec<vk::Image>,
     views: Vec<vk::ImageView>,
     framebuffers: Vec<vk::Framebuffer>,
+    render_finished_sems: Vec<vk::Semaphore>,
     render_pass: vk::RenderPass,
     pipeline: vk::Pipeline,
 }
@@ -333,7 +334,7 @@ impl VulkanOverlay {
 
         let mut views = Vec::with_capacity(images.len());
         let mut framebuffers = Vec::with_capacity(images.len());
-
+        let mut render_finished_sems = Vec::with_capacity(images.len());
         for &img in &images {
             let view_info = vk::ImageViewCreateInfo::default()
                 .image(img)
@@ -362,6 +363,9 @@ impl VulkanOverlay {
             };
             views.push(view);
             framebuffers.push(fb);
+            if let Ok(sem) = unsafe { self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) } {
+                render_finished_sems.push(sem);
+            }
         }
 
         {
@@ -377,6 +381,7 @@ impl VulkanOverlay {
             images,
             views,
             framebuffers,
+            render_finished_sems,
             render_pass,
             pipeline,
         });
@@ -398,6 +403,9 @@ impl VulkanOverlay {
                 let _ = self.device.device_wait_idle();
                 for fb in res.framebuffers {
                     self.device.destroy_framebuffer(fb, None);
+                }
+                for sem in res.render_finished_sems {
+                    self.device.destroy_semaphore(sem, None);
                 }
                 for v in res.views {
                     self.device.destroy_image_view(v, None);
@@ -424,11 +432,14 @@ impl VulkanOverlay {
         }
         let img = *res.images.get(image_index as usize)?;
         let fb = *res.framebuffers.get(image_index as usize)?;
+        let img_render_finished = res
+            .render_finished_sems
+            .get(image_index as usize)
+            .copied();
         let extent = res.extent;
         let is_srgb = res.is_srgb;
         let render_pass = res.render_pass;
         let pipeline = res.pipeline;
-
         let (refresh_lm, fb_enabled, fb_mode, fb_strength, capturing_now) = {
             let mut st = STATE.lock();
             st.screen_size = [extent.width.max(1), extent.height.max(1)];
@@ -799,7 +810,8 @@ impl VulkanOverlay {
 
             let stage_buf = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT; 8];
             let stage_count = wait_semaphores.len().min(stage_buf.len());
-            let sig = [slot.render_finished];
+            let signal_sem = img_render_finished.unwrap_or(slot.render_finished);
+            let sig = [signal_sem];
             let cmds = [cmd];
             let submit = vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores[..stage_count])
@@ -809,7 +821,7 @@ impl VulkanOverlay {
             if self.device.queue_submit(queue, &[submit], slot.fence).is_err() {
                 return None;
             }
-            Some(slot.render_finished)
+            Some(signal_sem)
         }
     }
 }

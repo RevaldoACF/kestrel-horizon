@@ -156,8 +156,8 @@ fn connect_socket() -> Option<(BufReader<UnixStream>, UnixStream)> {
             continue;
         }
         if let Ok(stream) = UnixStream::connect(&path) {
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(120)));
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(120)));
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(2200)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
             if let Ok(cloned) = stream.try_clone() {
                 return Some((BufReader::new(cloned), stream));
             }
@@ -217,8 +217,11 @@ fn is_edible_food(item: &str) -> bool {
 }
 
 fn parse_state(v: &Value, dst: &mut LiveGameState) {
+    let Some(scr) = v.get("screen").and_then(|x| x.as_str()) else {
+        return;
+    };
     dst.socket_connected = true;
-    dst.screen = v["screen"].as_str().unwrap_or("unknown").to_string();
+    dst.screen = scr.to_string();
     dst.dimension = v["dimension"].as_str().unwrap_or("minecraft:overworld").to_string();
     dst.world_name = v["world"].as_str().unwrap_or("").to_string();
 
@@ -430,6 +433,11 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
 
     // Survival & combat helper state
     let mut sprint_held_by_bot = false;
+    let mut auto_mine_held = false;
+    let mut was_mining = false;
+    let mut last_haste_at = Instant::now() - Duration::from_secs(10);
+    let mut last_haste_amp: u32 = u32::MAX;
+    let mut conn_misses: u32 = 0;
     let mut last_respawn = Instant::now() - Duration::from_secs(5);
     let mut last_eat = Instant::now() - Duration::from_secs(5);
     let mut last_totem = Instant::now() - Duration::from_secs(5);
@@ -446,15 +454,17 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         if conn.is_none() {
             conn = connect_socket();
             if conn.is_none() {
-                {
+                conn_misses = conn_misses.saturating_add(1);
+                if conn_misses >= 5 {
                     let mut st = STATE.lock();
                     st.game.socket_connected = false;
                     st.game.in_world = false;
                 }
                 while rx.try_recv().is_ok() {}
-                std::thread::sleep(Duration::from_millis(1000));
+                std::thread::sleep(Duration::from_millis(850));
                 continue;
             }
+            conn_misses = 0;
         }
 
         let (reader, writer) = conn.as_mut().unwrap();
@@ -530,8 +540,10 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             )
         };
 
+        let mut now_mining = false;
         if let Some(v) = send_line(reader, writer, "state") {
             parse_state(&v, &mut live_snapshot);
+            now_mining = v.get("mining").is_some_and(|m| !m.is_null());
         } else {
             conn = None;
             continue;
@@ -729,17 +741,26 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             && last_respawn.elapsed() >= Duration::from_secs(1)
         {
             last_respawn = Instant::now();
-            let _ = send_line(reader, writer, "respawn");
+            if send_line(reader, writer, "respawn").is_none() {
+                conn = None;
+                continue;
+            }
         }
 
         // 2. AutoSprint
         if cfg.auto_sprint && playing_now && key_w && live_snapshot.food > 6 {
             if !live_snapshot.sprinting && !sprint_held_by_bot {
-                let _ = send_line(reader, writer, "key ctrl down");
+                if send_line(reader, writer, "key ctrl down").is_none() {
+                    conn = None;
+                    continue;
+                }
                 sprint_held_by_bot = true;
             }
         } else if sprint_held_by_bot {
-            let _ = send_line(reader, writer, "key ctrl up");
+            if send_line(reader, writer, "key ctrl up").is_none() {
+                conn = None;
+                continue;
+            }
             sprint_held_by_bot = false;
         }
 
@@ -822,20 +843,79 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             if cfg.criticals_enabled && live_snapshot.on_ground {
                 perform_crit_attack(reader, writer, true, live_snapshot.sprinting);
             } else {
-                let _ = send_line(reader, writer, "mouse left click");
+                if send_line(reader, writer, "mouse left click").is_none() {
+                    conn = None;
+                    continue;
+                }
             }
         }
 
         // 7. AutoClicker
-        if cfg.auto_clicker && playing_now && lmb_down {
+        if cfg.auto_clicker
+            && playing_now
+            && lmb_down
+            && !(cfg.auto_mine && live_snapshot.looking_at_kind == "block")
+        {
             let interval_ms = (1000 / cfg.auto_clicker_cps.clamp(4, 20)) as u64;
             if last_clicker.elapsed() >= Duration::from_millis(interval_ms) {
                 last_clicker = Instant::now();
-                let _ = send_line(reader, writer, "mouse left click");
+                if send_line(reader, writer, "mouse left click").is_none() {
+                    conn = None;
+                    continue;
+                }
             }
         }
 
-        // 8. AntiAFK
+        // 8. AutoMine & SpeedMine
+        if cfg.speed_mine && playing_now {
+            let amp = cfg.speed_mine_power.saturating_sub(1).min(4);
+            if last_haste_at.elapsed() >= Duration::from_secs(2) || last_haste_amp != amp {
+                last_haste_at = Instant::now();
+                last_haste_amp = amp;
+                if send_line(reader, writer, &format!("effect haste 4 {amp}")).is_none() {
+                    conn = None;
+                    continue;
+                }
+            }
+        } else {
+            last_haste_amp = u32::MAX;
+        }
+
+        if cfg.auto_mine
+            && playing_now
+            && live_snapshot.looking_at_kind == "block"
+            && live_snapshot.looking_at_dist <= 4.8
+        {
+            if !auto_mine_held {
+                if send_line(reader, writer, "mouse left down").is_none() {
+                    conn = None;
+                    continue;
+                }
+                auto_mine_held = true;
+            } else if cfg.speed_mine && was_mining && !now_mining {
+                let _ = send_line(reader, writer, "mouse left up");
+                if send_line(reader, writer, "mouse left down").is_none() {
+                    auto_mine_held = false;
+                    conn = None;
+                    continue;
+                }
+            }
+        } else {
+            if auto_mine_held {
+                let _ = send_line(reader, writer, "mouse left up");
+                auto_mine_held = false;
+            }
+            if cfg.speed_mine && playing_now && lmb_down && was_mining && !now_mining {
+                let _ = send_line(reader, writer, "mouse left up");
+                if send_line(reader, writer, "mouse left down").is_none() {
+                    conn = None;
+                    continue;
+                }
+            }
+        }
+        was_mining = now_mining;
+
+        // 9. AntiAFK
         if cfg.anti_afk && playing_now {
             let moved = match last_move_pos {
                 Some(prev) => {
@@ -851,7 +931,10 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                 && last_afk_pulse.elapsed() >= Duration::from_secs(25)
             {
                 last_afk_pulse = Instant::now();
-                let _ = send_line(reader, writer, "key shift tap");
+                if send_line(reader, writer, "key shift tap").is_none() {
+                    conn = None;
+                    continue;
+                }
             }
         }
 
@@ -896,7 +979,10 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                 let s = cfg.aim_smooth.clamp(0.12, 0.90);
                 let sy = (dyaw * s).clamp(-22.0, 22.0);
                 let sp = (dpitch * s).clamp(-16.0, 16.0);
-                let _ = send_line(reader, writer, &format!("turn {sy:.2} {sp:.2} --over 0.05"));
+                if send_line(reader, writer, &format!("turn {sy:.2} {sp:.2} --over 0.05")).is_none() {
+                    conn = None;
+                    continue;
+                }
             }
         }
 
@@ -905,7 +991,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             st.game = live_snapshot;
         }
 
-        let sleep_ms = if cfg.aim_assist || cfg.trigger_bot || cfg.auto_clicker {
+        let sleep_ms = if cfg.aim_assist || cfg.trigger_bot || cfg.auto_clicker || cfg.auto_mine || cfg.speed_mine {
             85
         } else {
             160

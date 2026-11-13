@@ -1096,7 +1096,75 @@ fn render_automation_tab(
         focusables,
     );
 
+    y += 122.0;
+
+    let am_r = Rect::new(x, y, cw, 112.0);
+    dl.rect_border(am_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(atlas, FontKind::UiSemi, am_r.x + 14.0, am_r.y + 12.0, "AutoMine", palette::TEXT_PRIMARY);
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        am_r.x + 14.0,
+        am_r.y + 32.0,
+        "Automatically holds mine on aimed blocks.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(am_r.x + cw - 78.0, am_r.y + 12.0, 64.0, 28.0),
+        st.config.auto_mine,
+        FocusId::AutoMineToggle,
+        focusables,
+    );
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        am_r.x + 14.0,
+        am_r.y + 68.0,
+        "Releases automatically when looking away.",
+        palette::TEXT_SECONDARY,
+    );
+
+    let sm_r = Rect::new(x + cw + gap, y, cw, 112.0);
+    dl.rect_border(sm_r, 8.0, palette::SURFACE, 1.0, palette::BORDER);
+    dl.text(atlas, FontKind::UiSemi, sm_r.x + 14.0, sm_r.y + 12.0, "SpeedMine", palette::TEXT_PRIMARY);
+    dl.text(
+        atlas,
+        FontKind::UiSmall,
+        sm_r.x + 14.0,
+        sm_r.y + 32.0,
+        "Breaks blocks faster with minimal delay.",
+        palette::TEXT_SECONDARY,
+    );
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(sm_r.x + cw - 78.0, sm_r.y + 12.0, 64.0, 28.0),
+        st.config.speed_mine,
+        FocusId::SpeedMineToggle,
+        focusables,
+    );
+    let speed_pct = 100 + st.config.speed_mine_power * 20;
+    draw_slider(
+        st,
+        dl,
+        atlas,
+        Rect::new(sm_r.x + 14.0, sm_r.y + 56.0, cw - 28.0, 46.0),
+        "Mine Speed",
+        &format!("{:.1}x", speed_pct as f32 / 100.0),
+        st.config.speed_mine_power as f32,
+        1.0,
+        5.0,
+        1.0,
+        FocusId::SpeedMinePowerSlider,
+        focusables,
+    );
+
     y + 112.0
+
 }
 
 fn render_hud_tab(
@@ -1521,7 +1589,7 @@ fn render_search_results(
     );
     y += 24.0;
 
-    let items: [(&str, &str, bool, FocusId); 24] = [
+    let items: [(&str, &str, bool, FocusId); 26] = [
         ("Fullbright", "Lights up dark caves and night areas", st.config.fullbright_enabled, FocusId::FullbrightToggle),
         ("Ore X-Ray (3D ESP)", "Spot buried Diamond, Debris, Gold, Iron", st.config.xray_ores, FocusId::XrayOresToggle),
         ("Cave Wireframe", "See underground tunnels and lava pockets", st.config.xray_terrain, FocusId::XrayTerrainToggle),
@@ -1539,11 +1607,13 @@ fn render_search_results(
         ("AutoFish", "Auto-reels and recasts fishing rod", st.config.auto_fish, FocusId::AutoFishToggle),
         ("TriggerBot", "Strikes the target under your crosshair", st.config.trigger_bot, FocusId::TriggerBotToggle),
         ("AutoClicker", "Clicks continuously while holding attack", st.config.auto_clicker, FocusId::AutoClickerToggle),
+        ("AutoMine", "Automatically holds mine on aimed blocks", st.config.auto_mine, FocusId::AutoMineToggle),
+        ("SpeedMine", "Breaks blocks faster with minimal delay", st.config.speed_mine, FocusId::SpeedMineToggle),
         ("AntiAFK", "Taps sneak when idle to avoid AFK kick", st.config.anti_afk, FocusId::AntiAfkToggle),
         ("OptiZoom", "Hold key to zoom in", st.config.zoom_enabled, FocusId::ZoomToggle),
         ("Crosshair+", "Custom reticle overlay", st.config.crosshair_enabled, FocusId::CrosshairToggle),
-        ("Coordinates HUD", "XYZ and Nether portal coordinates", st.config.hud_coords.enabled, FocusId::HudToggleCoords),
-        ("FPS & Status HUD", "FPS, frame time, and active states", st.config.hud_fps.enabled, FocusId::HudToggleFps),
+        ("Coordinates HUD", "Coordinates and Nether portal converter", st.config.hud_coords.enabled, FocusId::HudToggleCoords),
+        ("FPS & Status HUD", "FPS and active visual modes", st.config.hud_fps.enabled, FocusId::HudToggleFps),
         ("Keystrokes & CPS", "Live movement keys and click speed", st.config.hud_keystrokes.enabled, FocusId::HudToggleKeystrokes),
         ("Waypoint Compass", "Directional compass for saved markers", st.config.hud_compass.enabled, FocusId::HudToggleCompass),
     ];
@@ -2196,6 +2266,9 @@ fn apply_slider_pos(
         FocusId::AutoClickerCpsSlider => {
             st.config.auto_clicker_cps = snapped.round() as u32;
         }
+        FocusId::SpeedMinePowerSlider => {
+            st.config.speed_mine_power = snapped.round() as u32;
+        }
         _ => {}
     }
 }
@@ -2250,6 +2323,10 @@ fn nudge_slider(st: &mut AppState, fid: FocusId, delta: f32, min: f32, max: f32)
             let next = (st.config.auto_clicker_cps as f32 + delta).clamp(min, max);
             st.config.auto_clicker_cps = next.round() as u32;
         }
+        FocusId::SpeedMinePowerSlider => {
+            let next = (st.config.speed_mine_power as f32 + delta).clamp(min, max);
+            st.config.speed_mine_power = next.round() as u32;
+        }
         _ => {}
     }
 }
@@ -2286,6 +2363,8 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.trigger_bot = false;
             st.config.auto_clicker = false;
             st.config.anti_afk = false;
+            st.config.auto_mine = false;
+            st.config.speed_mine = false;
             st.lightmap_dirty = true;
             st.set_toast("Panic: all survival/combat modules disabled");
         }
@@ -2379,6 +2458,13 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         FocusId::AimAssistToggle => {
             st.config.aim_assist = !st.config.aim_assist;
         }
+        FocusId::AutoMineToggle => {
+            st.config.auto_mine = !st.config.auto_mine;
+        }
+        FocusId::SpeedMineToggle => {
+            st.config.speed_mine = !st.config.speed_mine;
+        }
+        FocusId::SpeedMinePowerSlider => {}
         FocusId::AimTargetCycle => {
             st.config.aim_target = match st.config.aim_target {
                 AimTarget::Hostile => AimTarget::Players,

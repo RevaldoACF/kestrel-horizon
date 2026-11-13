@@ -175,6 +175,9 @@ pub struct KestrelConfig {
     pub auto_clicker: bool,
     pub auto_clicker_cps: u32,
     pub anti_afk: bool,
+    pub auto_mine: bool,
+    pub speed_mine: bool,
+    pub speed_mine_power: u32,
 
     pub waypoints: Vec<Waypoint>,
 }
@@ -268,6 +271,9 @@ impl Default for KestrelConfig {
             auto_clicker: false,
             auto_clicker_cps: 10,
             anti_afk: false,
+            auto_mine: false,
+            speed_mine: false,
+            speed_mine_power: 2,
 
             waypoints: Vec::new(),
         }

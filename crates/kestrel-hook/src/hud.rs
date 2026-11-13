@@ -21,21 +21,21 @@ fn facing_label(yaw: f32) -> (&'static str, &'static str) {
     // Minecraft yaw: 0 = +Z (South), 90 = -X (West), 180/-180 = -Z (North), -90 = +X (East)
     let norm = ((yaw % 360.0) + 360.0) % 360.0;
     if !(22.5..337.5).contains(&norm) {
-        ("S", "+Z")
+        ("S", "South")
     } else if norm < 67.5 {
-        ("SW", "-X/+Z")
+        ("SW", "South-West")
     } else if norm < 112.5 {
-        ("W", "-X")
+        ("W", "West")
     } else if norm < 157.5 {
-        ("NW", "-X/-Z")
+        ("NW", "North-West")
     } else if norm < 202.5 {
-        ("N", "-Z")
+        ("N", "North")
     } else if norm < 247.5 {
-        ("NE", "+X/-Z")
+        ("NE", "North-East")
     } else if norm < 292.5 {
-        ("E", "+X")
+        ("E", "East")
     } else {
-        ("SE", "+X/+Z")
+        ("SE", "South-East")
     }
 }
 
@@ -73,7 +73,7 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
         draw_entity_esp_and_tracers(st, dl, atlas, sw, sh);
     }
     if st.config.freecam_enabled && st.game.in_world {
-        let txt = "Freecam Active · WASD/Space/Shift to fly";
+        let txt = "Freecam Active";
         let tw = atlas.measure(FontKind::UiSemi, txt) + 24.0;
         let br = Rect::new((sw - tw) * 0.5, 68.0, tw, 26.0);
         dl.rect_border(br, 6.0, palette::HUD_BG, 1.0, palette::ACCENT);
@@ -138,8 +138,7 @@ fn handle_hud_drag(
 ) {
     let [mx, my] = st.cursor_pos;
 
-    // Top instruction banner
-    let banner_text = "HUD Layout Editor · Drag panels to move · Press Esc or ` to finish";
+    let banner_text = "Drag panels to move · Press Esc or ` to finish";
     let bw = atlas.measure(FontKind::UiSemi, banner_text) + 32.0;
     let br = Rect::new((sw - bw) * 0.5, sh - 54.0, bw, 34.0);
     dl.shadow(br, 8.0, 12.0, palette::SHADOW);
@@ -267,7 +266,7 @@ fn draw_coords_widget(
     atlas: &FontAtlas,
     sw: f32,
     sh: f32,
-    editing: bool,
+    _editing: bool,
 ) -> Rect {
     let show_nether = st.config.hud_nether_convert;
     let h = if show_nether { 66.0 } else { 46.0 };
@@ -285,37 +284,31 @@ fn draw_coords_widget(
 
     let (line1, line2, sub) = if st.game.in_world {
         let [x, y, z] = st.game.pos;
-        let (dir, axis) = facing_label(st.game.yaw);
+        let (_, dir_full) = facing_label(st.game.yaw);
         let is_nether = st.game.dimension.contains("nether");
         let is_end = st.game.dimension.contains("end");
         let dim_tag = if is_nether {
-            "NETHER"
+            "Nether"
         } else if is_end {
-            "THE END"
+            "The End"
         } else {
-            "OVERWORLD"
+            "Overworld"
         };
-        let l1 = format!("XYZ  {:.0} / {:.0} / {:.0}", x.floor(), y.floor(), z.floor());
-        let l2 = format!("{dir} ({axis}) · {dim_tag}");
+        let l1 = format!("{:.0}, {:.0}, {:.0}", x.floor(), y.floor(), z.floor());
+        let l2 = format!("{dir_full} · {dim_tag}");
         let sub = if is_nether {
-            format!("OW   {:.0} / {:.0}", x * 8.0, z * 8.0)
+            format!("Overworld: {:.0}, {:.0}", x * 8.0, z * 8.0)
         } else if !is_end {
-            format!("NTH  {:.0} / {:.0}", x / 8.0, z / 8.0)
+            format!("Nether: {:.0}, {:.0}", x / 8.0, z / 8.0)
         } else {
-            String::from("END  No portal ratio")
+            String::new()
         };
         (l1, l2, sub)
-    } else if !st.game.socket_connected && !editing {
-        (
-            String::from("XYZ  Socket offline"),
-            String::from("Enable agentControl in Extras"),
-            String::from("NTH  -- / --"),
-        )
     } else {
         (
-            String::from("XYZ  128 / 64 / -240"),
-            String::from("N (-Z) · OVERWORLD"),
-            String::from("NTH  16 / -30"),
+            String::from("128, 64, -240"),
+            String::from("North · Overworld"),
+            String::from("Nether: 16, -30"),
         )
     };
 
@@ -335,7 +328,7 @@ fn draw_coords_widget(
         &line2,
         palette::ACCENT.with_alpha(alpha),
     );
-    if show_nether {
+    if show_nether && !sub.is_empty() {
         dl.text(
             atlas,
             FontKind::MonoSmall,
@@ -356,7 +349,7 @@ fn draw_fps_widget(
     sh: f32,
     _editing: bool,
 ) -> Rect {
-    let w = 204.0;
+    let w = 152.0;
     let h = 48.0;
     let r = widget_rect(&st.config.hud_fps, w, h, sw, sh);
     let alpha = if st.config.hud_fps.enabled { 1.0 } else { 0.45 };
@@ -369,25 +362,22 @@ fn draw_fps_widget(
         palette::BORDER.with_alpha(alpha),
     );
 
-    let fps_str = format!(
-        "{:.0} FPS  {:.1}ms  (1%: {:.0})",
-        st.fps, st.frame_ms, st.low_1pct_fps
-    );
+    let fps_str = format!("{:.0} FPS", st.fps);
     dl.text(
         atlas,
-        FontKind::MonoSmall,
+        FontKind::MonoBody,
         r.x + 10.0,
-        r.y + 8.0,
+        r.y + 7.0,
         &fps_str,
         palette::TEXT_PRIMARY.with_alpha(alpha),
     );
 
     let xray_on = st.config.xray_ores || st.config.xray_terrain || st.config.xray_entities;
     let fb_status = match (st.config.fullbright_enabled, xray_on) {
-        (true, true) => "FB ON · XRAY ON",
-        (true, false) => "FULLBRIGHT ON",
-        (false, true) => "FB OFF · XRAY ON",
-        (false, false) => "FULLBRIGHT OFF",
+        (true, true) => "Fullbright · X-Ray",
+        (true, false) => "Fullbright",
+        (false, true) => "X-Ray",
+        (false, false) => "Standard Light",
     };
     let fb_col = if st.config.fullbright_enabled || xray_on {
         palette::SUCCESS
@@ -516,7 +506,7 @@ fn draw_vitals_widget(
     atlas: &FontAtlas,
     sw: f32,
     sh: f32,
-    editing: bool,
+    _editing: bool,
 ) -> Rect {
     let w = 212.0;
     let eff_count = st.game.effects.len().min(3);
@@ -539,11 +529,11 @@ fn draw_vitals_widget(
             palette::SUCCESS
         };
         let hp_txt = if st.game.absorption > 0.0 {
-            format!("HP {:.1} (+{:.0})", st.game.health, st.game.absorption)
+            format!("Health {:.1} (+{:.0})", st.game.health, st.game.absorption)
         } else {
-            format!("HP {:.1}/20", st.game.health)
+            format!("Health {:.1} / 20", st.game.health)
         };
-        let food_txt = format!("FOOD {}/20  XP {}", st.game.food, st.game.xp_level);
+        let food_txt = format!("Food {}/20 · Lv {}", st.game.food, st.game.xp_level);
         dl.text(
             atlas,
             FontKind::MonoBody,
@@ -576,18 +566,14 @@ fn draw_vitals_widget(
 
         let target_line = if let Some(lbl) = &st.game.looking_at_label {
             if let Some(thp) = st.game.looking_at_hp {
-                format!("Target: {lbl} ({thp:.1} HP)")
+                format!("{lbl} · {thp:.1} HP")
             } else {
-                format!("Look: {lbl}")
+                lbl.clone()
             }
         } else if let Some(held) = &st.game.held_item {
-            if st.game.held_damage > 0 {
-                format!("Held: {held} (-{} dmg)", st.game.held_damage)
-            } else {
-                format!("Held: {held}")
-            }
+            held.clone()
         } else {
-            String::from("Held: Empty hand")
+            String::from("Empty Hand")
         };
         dl.text(
             atlas,
@@ -599,8 +585,8 @@ fn draw_vitals_widget(
         );
 
         if let Some((eid, secs, amp)) = st.game.effects.first() {
-            let clean = eid.strip_prefix("minecraft:").unwrap_or(eid);
-            let eff_txt = format!("Effect: {clean} {} ({}s)", amp + 1, secs);
+            let clean = eid.strip_prefix("minecraft:").unwrap_or(eid).replace('_', " ");
+            let eff_txt = format!("{clean} {} ({}s)", amp + 1, secs);
             dl.text(
                 atlas,
                 FontKind::MonoSmall,
@@ -610,30 +596,13 @@ fn draw_vitals_widget(
                 palette::TEXT_SECONDARY.with_alpha(alpha),
             );
         }
-    } else if !st.game.socket_connected && !editing {
-        dl.text(
-            atlas,
-            FontKind::UiSemi,
-            r.x + 10.0,
-            r.y + 10.0,
-            "Vitals & Inventory",
-            palette::TEXT_PRIMARY.with_alpha(alpha),
-        );
-        dl.text(
-            atlas,
-            FontKind::UiSmall,
-            r.x + 10.0,
-            r.y + 32.0,
-            "Waiting for horizon-control.sock",
-            palette::TEXT_SECONDARY.with_alpha(alpha),
-        );
     } else {
         dl.text(
             atlas,
             FontKind::MonoBody,
             r.x + 10.0,
             r.y + 8.0,
-            "HP 20.0/20",
+            "Health 20.0 / 20",
             palette::SUCCESS.with_alpha(alpha),
         );
         dl.text(
@@ -641,7 +610,7 @@ fn draw_vitals_widget(
             FontKind::MonoSmall,
             r.x + 10.0,
             r.y + 28.0,
-            "FOOD 20/20  XP 30",
+            "Food 20/20 · Lv 30",
             palette::TEXT_PRIMARY.with_alpha(alpha),
         );
         dl.text(
@@ -657,7 +626,7 @@ fn draw_vitals_widget(
             FontKind::UiSmall,
             r.x + 10.0,
             r.y + 65.0,
-            "Target: Preview",
+            "Diamond Sword",
             palette::ACCENT.with_alpha(alpha),
         );
     }
@@ -726,9 +695,9 @@ fn draw_compass_widget(
 
     if active.is_empty() {
         let msg = if editing || !st.game.in_world {
-            "Waypoint Compass · Add waypoints via [`]"
+            "Waypoints"
         } else {
-            "No active waypoints in this dimension"
+            "No waypoints"
         };
         let tw = atlas.measure(FontKind::UiSmall, msg);
         dl.text(
@@ -813,7 +782,7 @@ fn draw_clock_widget(
             format_mc_time(st.game.time_of_day)
         )
     } else {
-        String::from("World Time: Not in world")
+        String::from("Day 1 · 12:00 · Clear")
     };
 
     dl.text(
@@ -842,11 +811,12 @@ fn draw_radar_widget(
     atlas: &FontAtlas,
     sw: f32,
     sh: f32,
-    editing: bool,
+    _editing: bool,
 ) -> Rect {
+    let w = 172.0;
     let size = 148.0;
     let total_h = size + 38.0;
-    let r = widget_rect(&st.config.hud_radar, size, total_h, sw, sh);
+    let r = widget_rect(&st.config.hud_radar, w, total_h, sw, sh);
     let alpha = if st.config.hud_radar.enabled { 1.0 } else { 0.45 };
 
     dl.rect_border(
@@ -857,7 +827,7 @@ fn draw_radar_widget(
         palette::BORDER.with_alpha(alpha),
     );
 
-    let map_r = Rect::new(r.x + 6.0, r.y + 22.0, size - 12.0, size - 12.0);
+    let map_r = Rect::new(r.x + 12.0, r.y + 22.0, size - 12.0, size - 12.0);
     let cx = map_r.x + map_r.w * 0.5;
     let cy = map_r.y + map_r.h * 0.5;
     let half = map_r.w * 0.5 - 4.0;
@@ -875,7 +845,7 @@ fn draw_radar_widget(
     );
 
     if st.game.in_world {
-        let title = format!("Radar · {} near", st.game.nearby_entities.len());
+        let title = format!("Radar ({})", st.game.nearby_entities.len());
         dl.text(
             atlas,
             FontKind::MonoSmall,
@@ -917,7 +887,7 @@ fn draw_radar_widget(
         }
         dl.pop_scissor();
     } else {
-        let lbl = if editing { "Radar · Preview" } else { "Radar · Idle" };
+        let lbl = "Radar";
         dl.text(
             atlas,
             FontKind::MonoSmall,
@@ -938,12 +908,12 @@ fn draw_radar_widget(
     // Compact color legend row at bottom
     let ly = r.y + total_h - 17.0;
     let legend = [
-        ("Me", Color::hex(0xFFFFFF, 1.0)),
+        ("You", Color::hex(0xFFFFFF, 1.0)),
         ("Ply", Color::hex(0xF5C542, 1.0)),
         ("Mob", palette::DANGER),
-        ("Pas", palette::SUCCESS),
+        ("Safe", palette::SUCCESS),
     ];
-    let mut lx = r.x + 7.0;
+    let mut lx = r.x + 8.0;
     for (tag, col) in legend {
         dl.rect(Rect::new(lx, ly + 3.0, 6.0, 6.0), 3.0, col.with_alpha(alpha));
         dl.text(
@@ -954,7 +924,7 @@ fn draw_radar_widget(
             tag,
             palette::TEXT_SECONDARY.with_alpha(alpha),
         );
-        lx += 34.0;
+        lx += 39.0;
     }
 
     r

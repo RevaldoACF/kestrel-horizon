@@ -113,6 +113,9 @@ pub enum FocusId {
     AutoClickerToggle,
     AutoClickerCpsSlider,
     AntiAfkToggle,
+    AutoMineToggle,
+    SpeedMineToggle,
+    SpeedMinePowerSlider,
     // Waypoints controls
     WaypointInput,
     WaypointAddHere,
