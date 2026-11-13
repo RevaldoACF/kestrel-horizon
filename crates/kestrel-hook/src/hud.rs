@@ -1,4 +1,6 @@
 use crate::config::{CrosshairStyle, HudWidget};
+use crate::control_bridge::OreKind;
+use crate::hooks_vk::latest_view_proj;
 use crate::draw::{palette, Color, DrawList, Rect};
 use crate::font::{FontAtlas, FontKind};
 use crate::state::{AppState, DragWidget};
@@ -58,6 +60,11 @@ pub fn render_hud(st: &mut AppState, dl: &mut DrawList, atlas: &FontAtlas) {
     // Show HUD only inside an active world (or during HUD layout editing), just like Lunar/Wurst
     if !st.game.in_world && !editing {
         return;
+    }
+
+    // 3D Ore X-Ray ESP boxes (when inside world)
+    if st.config.xray_ores && st.game.in_world {
+        draw_ore_xray(st, dl, atlas, sw, sh);
     }
 
     // Crosshair+ (only while playing with menu closed)
@@ -361,7 +368,7 @@ fn draw_fps_widget(
         palette::TEXT_PRIMARY.with_alpha(alpha),
     );
 
-    let xray_on = st.config.xray_terrain || st.config.xray_entities;
+    let xray_on = st.config.xray_ores || st.config.xray_terrain || st.config.xray_entities;
     let fb_status = match (st.config.fullbright_enabled, xray_on) {
         (true, true) => "FB ON · XRAY ON",
         (true, false) => "FULLBRIGHT ON",
@@ -814,6 +821,51 @@ fn draw_clock_widget(
     r
 }
 
+fn is_hostile_mob(id: &str) -> bool {
+    let name = id.strip_prefix("minecraft:").unwrap_or(id);
+    matches!(
+        name,
+        "zombie"
+            | "zombie_villager"
+            | "husk"
+            | "drowned"
+            | "skeleton"
+            | "stray"
+            | "bogged"
+            | "wither_skeleton"
+            | "creeper"
+            | "spider"
+            | "cave_spider"
+            | "enderman"
+            | "endermite"
+            | "silverfish"
+            | "witch"
+            | "slime"
+            | "magma_cube"
+            | "blaze"
+            | "ghast"
+            | "phantom"
+            | "pillager"
+            | "vindicator"
+            | "evoker"
+            | "ravager"
+            | "vex"
+            | "warden"
+            | "guardian"
+            | "elder_guardian"
+            | "shulker"
+            | "piglin_brute"
+            | "hoglin"
+            | "zoglin"
+            | "zombified_piglin"
+            | "piglin"
+            | "breeze"
+            | "creaking"
+            | "ender_dragon"
+            | "wither"
+    )
+}
+
 fn draw_radar_widget(
     st: &AppState,
     dl: &mut DrawList,
@@ -822,8 +874,9 @@ fn draw_radar_widget(
     sh: f32,
     editing: bool,
 ) -> Rect {
-    let size = 132.0;
-    let r = widget_rect(&st.config.hud_radar, size, size + 22.0, sw, sh);
+    let size = 148.0;
+    let total_h = size + 38.0;
+    let r = widget_rect(&st.config.hud_radar, size, total_h, sw, sh);
     let alpha = if st.config.hud_radar.enabled { 1.0 } else { 0.45 };
 
     dl.rect_border(
@@ -834,7 +887,7 @@ fn draw_radar_widget(
         palette::BORDER.with_alpha(alpha),
     );
 
-    let map_r = Rect::new(r.x + 4.0, r.y + 22.0, size - 8.0, size - 8.0);
+    let map_r = Rect::new(r.x + 6.0, r.y + 22.0, size - 12.0, size - 12.0);
     let cx = map_r.x + map_r.w * 0.5;
     let cy = map_r.y + map_r.h * 0.5;
     let half = map_r.w * 0.5 - 4.0;
@@ -849,12 +902,6 @@ fn draw_radar_widget(
         Rect::new(map_r.x + 2.0, cy - 0.5, map_r.w - 4.0, 1.0),
         0.0,
         palette::BORDER.with_alpha(0.35 * alpha),
-    );
-    // Player dot in center
-    dl.rect(
-        Rect::new(cx - 3.0, cy - 3.0, 6.0, 6.0),
-        3.0,
-        palette::TEXT_PRIMARY.with_alpha(alpha),
     );
 
     if st.game.in_world {
@@ -877,24 +924,24 @@ fn draw_radar_widget(
         for e in &st.game.nearby_entities {
             let dx = (e.pos[0] - st.game.pos[0]) as f32;
             let dz = (e.pos[2] - st.game.pos[2]) as f32;
-            // Rotate so forward (player look direction) is UP (-Y on screen)
-            // Minecraft yaw: 0=+Z, -90=+X => forward = (-sin(yaw), cos(yaw))
             let rx = (-dx * cos_y - dz * sin_y) / max_range * half;
             let ry = (dx * sin_y - dz * cos_y) / max_range * half;
             let px = (cx + rx).clamp(map_r.x + 3.0, map_r.x + map_r.w - 3.0);
             let py = (cy + ry).clamp(map_r.y + 3.0, map_r.y + map_r.h - 3.0);
-            let dot_col = if e.kind == "item" {
-                palette::ACCENT
-            } else if e.kind == "orb" {
-                palette::SUCCESS
-            } else if e.label.contains("player") {
-                Color::hex(0x52A8FF, 1.0)
+
+            let dot_col = if e.label == "minecraft:player" {
+                Color::hex(0xF5C542, 1.0) // Yellow: other players
+            } else if e.kind == "item" {
+                Color::hex(0x9FB1C8, 1.0) // Muted steel: dropped items
+            } else if e.kind == "orb" || !is_hostile_mob(&e.label) {
+                palette::SUCCESS // Green: non-hostile mobs & XP
             } else {
-                palette::DANGER
+                palette::DANGER // Red: hostile mobs
             };
+            let dot_sz = if e.label == "minecraft:player" { 6.0 } else { 5.0 };
             dl.rect(
-                Rect::new(px - 2.5, py - 2.5, 5.0, 5.0),
-                2.5,
+                Rect::new(px - dot_sz * 0.5, py - dot_sz * 0.5, dot_sz, dot_sz),
+                dot_sz * 0.5,
                 dot_col.with_alpha(alpha),
             );
         }
@@ -911,5 +958,128 @@ fn draw_radar_widget(
         );
     }
 
+    // White center marker = Me (drawn on top)
+    dl.rect(
+        Rect::new(cx - 3.0, cy - 3.0, 6.0, 6.0),
+        3.0,
+        Color::hex(0xFFFFFF, alpha),
+    );
+
+    // Compact color legend row at bottom
+    let ly = r.y + total_h - 17.0;
+    let legend = [
+        ("Me", Color::hex(0xFFFFFF, 1.0)),
+        ("Ply", Color::hex(0xF5C542, 1.0)),
+        ("Mob", palette::DANGER),
+        ("Pas", palette::SUCCESS),
+    ];
+    let mut lx = r.x + 7.0;
+    for (tag, col) in legend {
+        dl.rect(Rect::new(lx, ly + 3.0, 6.0, 6.0), 3.0, col.with_alpha(alpha));
+        dl.text(
+            atlas,
+            FontKind::MonoSmall,
+            lx + 8.0,
+            ly,
+            tag,
+            palette::TEXT_SECONDARY.with_alpha(alpha),
+        );
+        lx += 34.0;
+    }
+
     r
+}
+
+fn ore_color(kind: OreKind) -> Color {
+    match kind {
+        OreKind::Diamond => Color::hex(0x4DE3FF, 1.0),
+        OreKind::Debris => Color::hex(0xFF8A47, 1.0),
+        OreKind::Emerald => Color::hex(0x2EC27E, 1.0),
+        OreKind::Gold => Color::hex(0xF5C542, 1.0),
+        OreKind::Iron => Color::hex(0xD8C3A5, 1.0),
+        OreKind::Lapis => Color::hex(0x4F8BFF, 1.0),
+        OreKind::Redstone => Color::hex(0xE05A47, 1.0),
+        OreKind::Coal => Color::hex(0xA8B3C4, 1.0),
+        OreKind::Copper => Color::hex(0xE08A52, 1.0),
+        OreKind::Quartz => Color::hex(0xF2F4F8, 1.0),
+        OreKind::Chest => Color::hex(0xE5A93B, 1.0),
+        OreKind::Spawner => Color::hex(0xD88CFF, 1.0),
+    }
+}
+
+fn project_point(m: &[[f32; 4]; 4], rx: f32, ry: f32, rz: f32, sw: f32, sh: f32) -> Option<[f32; 2]> {
+    let cx = m[0][0] * rx + m[1][0] * ry + m[2][0] * rz + m[3][0];
+    let cy = m[0][1] * rx + m[1][1] * ry + m[2][1] * rz + m[3][1];
+    let cw = m[0][3] * rx + m[1][3] * ry + m[2][3] * rz + m[3][3];
+    if cw <= 0.05 {
+        return None;
+    }
+    let nx = cx / cw;
+    let ny = cy / cw;
+    Some([(nx * 0.5 + 0.5) * sw, (0.5 - ny * 0.5) * sh])
+}
+
+fn draw_ore_xray(st: &AppState, dl: &mut DrawList, atlas: &FontAtlas, sw: f32, sh: f32) {
+    let Some(vp) = latest_view_proj() else {
+        return;
+    };
+    if st.game.ore_markers.is_empty() {
+        return;
+    }
+    let eye = st.game.eye;
+
+    for marker in st.game.ore_markers.iter().take(48) {
+        let bx = marker.pos[0] as f64 - eye[0];
+        let by = marker.pos[1] as f64 - eye[1];
+        let bz = marker.pos[2] as f64 - eye[2];
+
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut any_front = false;
+
+        for dx in [0.05, 0.95] {
+            for dy in [0.05, 0.95] {
+                for dz in [0.05, 0.95] {
+                    if let Some([sx, sy]) =
+                        project_point(&vp, (bx + dx) as f32, (by + dy) as f32, (bz + dz) as f32, sw, sh)
+                    {
+                        any_front = true;
+                        min_x = min_x.min(sx);
+                        min_y = min_y.min(sy);
+                        max_x = max_x.max(sx);
+                        max_y = max_y.max(sy);
+                    }
+                }
+            }
+        }
+
+        if !any_front || max_x < 0.0 || max_y < 0.0 || min_x > sw || min_y > sh {
+            continue;
+        }
+
+        let x0 = min_x.max(-4.0);
+        let y0 = min_y.max(-4.0);
+        let w = (max_x.min(sw + 4.0) - x0).clamp(8.0, sw * 0.6);
+        let h = (max_y.min(sh + 4.0) - y0).clamp(8.0, sh * 0.6);
+        let col = ore_color(marker.kind);
+
+        dl.rect_border(
+            Rect::new(x0, y0, w, h),
+            3.0,
+            col.with_alpha(0.12),
+            1.6,
+            col.with_alpha(0.92),
+        );
+
+        if marker.distance <= 32.0 {
+            let tag = format!("{} {:.0}m", marker.kind.short_label(), marker.distance);
+            let tw = atlas.measure(FontKind::MonoSmall, &tag) + 8.0;
+            let tx = x0 + (w - tw) * 0.5;
+            let ty = (y0 - 16.0).max(4.0);
+            dl.rect(Rect::new(tx, ty, tw, 15.0), 3.0, Color::hex(0x0F1216, 0.78));
+            dl.text(atlas, FontKind::MonoSmall, tx + 4.0, ty + 1.0, &tag, col);
+        }
+    }
 }

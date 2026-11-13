@@ -209,6 +209,23 @@ type FnXcbGrabPointer = unsafe extern "C" fn(
     u32,
 ) -> u32;
 type FnXcbUngrabPointer = unsafe extern "C" fn(*mut XcbConnection, u32) -> u32;
+type FnXDefaultScreen = unsafe extern "C" fn(*mut Display) -> c_int;
+type FnXRootWindow = unsafe extern "C" fn(*mut Display, c_int) -> Window;
+type FnXCreateBitmapFromData =
+    unsafe extern "C" fn(*mut Display, Window, *const c_char, c_uint, c_uint) -> c_ulong;
+type FnXCreatePixmapCursor = unsafe extern "C" fn(
+    *mut Display,
+    c_ulong,
+    c_ulong,
+    *mut c_void,
+    *mut c_void,
+    c_uint,
+    c_uint,
+) -> Cursor;
+type FnXFreePixmap = unsafe extern "C" fn(*mut Display, c_ulong) -> c_int;
+type FnXcbChangeWindowAttributes =
+    unsafe extern "C" fn(*mut XcbConnection, u32, u32, *const u32) -> u32;
+type FnXcbFlush = unsafe extern "C" fn(*mut XcbConnection) -> c_int;
 
 struct X11Fns {
     x_check_if_event: Option<FnXCheckIfEvent>,
@@ -220,10 +237,18 @@ struct X11Fns {
     x_grab_pointer: Option<FnXGrabPointer>,
     x_define_cursor: Option<FnXDefineCursor>,
     x_create_font_cursor: Option<FnXCreateFontCursor>,
+    x_default_screen: Option<FnXDefaultScreen>,
+    x_root_window: Option<FnXRootWindow>,
+    x_create_bitmap_from_data: Option<FnXCreateBitmapFromData>,
+    x_create_pixmap_cursor: Option<FnXCreatePixmapCursor>,
+    x_free_pixmap: Option<FnXFreePixmap>,
     x_flush: Option<FnXFlush>,
     x_get_xcb_conn: Option<FnXGetXCBConnection>,
     xcb_grab_pointer: Option<FnXcbGrabPointer>,
     xcb_ungrab_pointer: Option<FnXcbUngrabPointer>,
+    xcb_change_window_attributes: Option<FnXcbChangeWindowAttributes>,
+    xcb_change_window_attributes_checked: Option<FnXcbChangeWindowAttributes>,
+    xcb_flush: Option<FnXcbFlush>,
 }
 
 static X11_FNS: OnceLock<X11Fns> = OnceLock::new();
@@ -268,25 +293,41 @@ fn resolve_x11() -> &'static X11Fns {
             x_grab_pointer: sym!(libx11, c"XGrabPointer", FnXGrabPointer),
             x_define_cursor: sym!(libx11, c"XDefineCursor", FnXDefineCursor),
             x_create_font_cursor: sym!(libx11, c"XCreateFontCursor", FnXCreateFontCursor),
+            x_default_screen: sym!(libx11, c"XDefaultScreen", FnXDefaultScreen),
+            x_root_window: sym!(libx11, c"XRootWindow", FnXRootWindow),
+            x_create_bitmap_from_data: sym!(libx11, c"XCreateBitmapFromData", FnXCreateBitmapFromData),
+            x_create_pixmap_cursor: sym!(libx11, c"XCreatePixmapCursor", FnXCreatePixmapCursor),
+            x_free_pixmap: sym!(libx11, c"XFreePixmap", FnXFreePixmap),
             x_flush: sym!(libx11, c"XFlush", FnXFlush),
             x_get_xcb_conn: sym!(libx11_xcb, c"XGetXCBConnection", FnXGetXCBConnection),
             xcb_grab_pointer: sym!(libxcb, c"xcb_grab_pointer", FnXcbGrabPointer),
             xcb_ungrab_pointer: sym!(libxcb, c"xcb_ungrab_pointer", FnXcbUngrabPointer),
+            xcb_change_window_attributes: sym!(
+                libxcb,
+                c"xcb_change_window_attributes",
+                FnXcbChangeWindowAttributes
+            ),
+            xcb_change_window_attributes_checked: sym!(
+                libxcb,
+                c"xcb_change_window_attributes_checked",
+                FnXcbChangeWindowAttributes
+            ),
+            xcb_flush: sym!(libxcb, c"xcb_flush", FnXcbFlush),
         }
     })
 }
 
 static LAST_DISPLAY: AtomicUsize = AtomicUsize::new(0);
 static LAST_WINDOW: AtomicUsize = AtomicUsize::new(0);
+static LAST_XCB_CONN: AtomicUsize = AtomicUsize::new(0);
 static ARROW_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static EMPTY_CURSOR: AtomicUsize = AtomicUsize::new(0);
 static SAVED_GAME_CURSOR: AtomicUsize = AtomicUsize::new(0);
 static GAME_WANTS_GRAB: AtomicBool = AtomicBool::new(false);
 static GRAVE_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
-
-// Lock-free atomic state for zero-delay gameplay input!
 pub static UI_CAPTURING: AtomicBool = AtomicBool::new(false);
-pub static PASSIVE_KEYS_MASK: AtomicU8 = AtomicU8::new(0); // bit0=W,1=A,2=S,3=D,4=Space,5=LMB,6=RMB
+pub static PASSIVE_KEYS_MASK: AtomicU8 = AtomicU8::new(0);
 
 pub fn set_ui_capturing(capturing: bool) {
     UI_CAPTURING.store(capturing, Ordering::Relaxed);
@@ -310,6 +351,44 @@ fn ensure_arrow_cursor(dpy: *mut Display) -> Cursor {
     0
 }
 
+fn ensure_empty_cursor(dpy: *mut Display) -> Cursor {
+    let cached = EMPTY_CURSOR.load(Ordering::Relaxed) as Cursor;
+    if cached != 0 {
+        return cached;
+    }
+    let fns = resolve_x11();
+    if let (Some(ds), Some(rw), Some(cb), Some(cpc), Some(fp)) = (
+        fns.x_default_screen,
+        fns.x_root_window,
+        fns.x_create_bitmap_from_data,
+        fns.x_create_pixmap_cursor,
+        fns.x_free_pixmap,
+    ) {
+        unsafe {
+            let screen = ds(dpy);
+            let root = rw(dpy, screen);
+            let data: [c_char; 1] = [0];
+            let pixmap = cb(dpy, root, data.as_ptr(), 1, 1);
+            if pixmap != 0 {
+                let mut dummy = [0u8; 32];
+                let cur = cpc(
+                    dpy,
+                    pixmap,
+                    pixmap,
+                    dummy.as_mut_ptr() as *mut c_void,
+                    dummy.as_mut_ptr() as *mut c_void,
+                    0,
+                    0,
+                );
+                fp(dpy, pixmap);
+                EMPTY_CURSOR.store(cur as usize, Ordering::Relaxed);
+                return cur;
+            }
+        }
+    }
+    0
+}
+
 fn unlock_cursor_for_ui(dpy: *mut Display, win: Window) {
     let fns = resolve_x11();
     if dpy.is_null() {
@@ -319,12 +398,26 @@ fn unlock_cursor_for_ui(dpy: *mut Display, win: Window) {
         if let Some(f) = fns.x_ungrab_pointer {
             f(dpy, 0);
         }
-        if let Some(get_xcb) = fns.x_get_xcb_conn
-            && let Some(xcb_ungrab) = fns.xcb_ungrab_pointer
+        let mut conn = LAST_XCB_CONN.load(Ordering::Relaxed) as *mut XcbConnection;
+        if conn.is_null()
+            && let Some(get_xcb) = fns.x_get_xcb_conn
         {
-            let conn = get_xcb(dpy);
-            if !conn.is_null() {
+            conn = get_xcb(dpy);
+        }
+        if !conn.is_null() {
+            if let Some(xcb_ungrab) = fns.xcb_ungrab_pointer {
                 xcb_ungrab(conn, 0);
+            }
+            if win != 0
+                && let Some(cwa) = fns.xcb_change_window_attributes
+            {
+                let arrow = ensure_arrow_cursor(dpy) as u32;
+                if arrow != 0 {
+                    cwa(conn, win as u32, 1 << 14, &arrow);
+                }
+            }
+            if let Some(xcb_fl) = fns.xcb_flush {
+                xcb_fl(conn);
             }
         }
         if win != 0
@@ -346,27 +439,48 @@ fn restore_cursor_for_game(dpy: *mut Display, win: Window) {
     if dpy.is_null() || win == 0 {
         return;
     }
+    let in_world_playing = {
+        let st = STATE.lock();
+        st.game.in_world && st.game.screen == "playing"
+    };
+    let wants_grab = GAME_WANTS_GRAB.load(Ordering::Relaxed) || in_world_playing;
+
     unsafe {
-        let saved = SAVED_GAME_CURSOR.load(Ordering::Relaxed) as Cursor;
-        if saved != 0
-            && let Some(def_cur) = fns.x_define_cursor
-        {
-            def_cur(dpy, win, saved);
+        let mut target_cursor = SAVED_GAME_CURSOR.load(Ordering::Relaxed) as Cursor;
+        if target_cursor == 0 && wants_grab {
+            target_cursor = ensure_empty_cursor(dpy);
         }
-        if GAME_WANTS_GRAB.load(Ordering::Relaxed)
-            && let Some(grab) = fns.x_grab_pointer
+        let mut conn = LAST_XCB_CONN.load(Ordering::Relaxed) as *mut XcbConnection;
+        if conn.is_null()
+            && let Some(get_xcb) = fns.x_get_xcb_conn
         {
-            grab(
-                dpy,
-                win,
-                1,
-                (1 << 2) | (1 << 3) | (1 << 6),
-                1,
-                1,
-                win,
-                saved,
-                0,
-            );
+            conn = get_xcb(dpy);
+        }
+        if target_cursor != 0 {
+            if let Some(def_cur) = fns.x_define_cursor {
+                def_cur(dpy, win, target_cursor);
+            }
+            if !conn.is_null()
+                && let Some(cwa) = fns.xcb_change_window_attributes
+            {
+                let cid = target_cursor as u32;
+                cwa(conn, win as u32, 1 << 14, &cid);
+            }
+        }
+        if wants_grab {
+            let mask: u16 = (1 << 2) | (1 << 3) | (1 << 6); // ButtonPress | ButtonRelease | PointerMotion
+            if !conn.is_null()
+                && let Some(xcb_grab) = fns.xcb_grab_pointer
+            {
+                xcb_grab(conn, 1, win as u32, mask, 1, 1, win as u32, target_cursor as u32, 0);
+            } else if let Some(grab) = fns.x_grab_pointer {
+                grab(dpy, win, 1, mask as c_uint, 1, 1, win, target_cursor, 0);
+            }
+        }
+        if !conn.is_null()
+            && let Some(xcb_fl) = fns.xcb_flush
+        {
+            xcb_fl(conn);
         }
         if let Some(flush) = fns.x_flush {
             flush(dpy);
@@ -406,44 +520,53 @@ fn handle_key_in_ui(sym: KeySym, pressed: bool, text_buf: &str) {
         return;
     }
 
-    let mut st = STATE.lock();
-    match sym {
-        XK_ESCAPE => {
-            if st.hud_edit_mode {
-                st.hud_edit_mode = false;
-                st.dragging_widget = None;
-                let _ = st.config.save();
-                UI_CAPTURING.store(false, Ordering::Relaxed);
-                drop(st);
-                let dpy = LAST_DISPLAY.load(Ordering::Relaxed) as *mut Display;
-                let win = LAST_WINDOW.load(Ordering::Relaxed) as Window;
-                restore_cursor_for_game(dpy, win);
-                return;
+    let mut restore = false;
+    {
+        let mut st = STATE.lock();
+        match sym {
+            XK_ESCAPE => {
+                if st.hud_edit_mode {
+                    st.hud_edit_mode = false;
+                    st.dragging_widget = None;
+                    let _ = st.config.save();
+                    UI_CAPTURING.store(false, Ordering::Relaxed);
+                    restore = true;
+                } else if st.active_text_target.is_some() {
+                    st.pending_keys.push(UiKey::Escape);
+                } else {
+                    st.menu_open = false;
+                    UI_CAPTURING.store(false, Ordering::Relaxed);
+                    restore = true;
+                }
             }
-            st.pending_keys.push(UiKey::Escape);
-        }
-        XK_TAB => {
-            if SHIFT_DOWN.load(Ordering::Relaxed) {
-                st.pending_keys.push(UiKey::ShiftTab);
-            } else {
-                st.pending_keys.push(UiKey::Tab);
+            XK_TAB => {
+                if SHIFT_DOWN.load(Ordering::Relaxed) {
+                    st.pending_keys.push(UiKey::ShiftTab);
+                } else {
+                    st.pending_keys.push(UiKey::Tab);
+                }
             }
-        }
-        XK_ISO_LEFT_TAB => st.pending_keys.push(UiKey::ShiftTab),
-        XK_RETURN | XK_KP_ENTER => st.pending_keys.push(UiKey::Enter),
-        XK_BACKSPACE => st.pending_keys.push(UiKey::Backspace),
-        XK_SPACE => st.pending_keys.push(UiKey::Space),
-        XK_LEFT => st.pending_keys.push(UiKey::Left),
-        XK_RIGHT => st.pending_keys.push(UiKey::Right),
-        XK_UP => st.pending_keys.push(UiKey::Up),
-        XK_DOWN => st.pending_keys.push(UiKey::Down),
-        _ => {
-            for ch in text_buf.chars() {
-                if !ch.is_control() {
-                    st.pending_chars.push(ch);
+            XK_ISO_LEFT_TAB => st.pending_keys.push(UiKey::ShiftTab),
+            XK_RETURN | XK_KP_ENTER => st.pending_keys.push(UiKey::Enter),
+            XK_BACKSPACE => st.pending_keys.push(UiKey::Backspace),
+            XK_SPACE => st.pending_keys.push(UiKey::Space),
+            XK_LEFT => st.pending_keys.push(UiKey::Left),
+            XK_RIGHT => st.pending_keys.push(UiKey::Right),
+            XK_UP => st.pending_keys.push(UiKey::Up),
+            XK_DOWN => st.pending_keys.push(UiKey::Down),
+            _ => {
+                for ch in text_buf.chars() {
+                    if !ch.is_control() {
+                        st.pending_chars.push(ch);
+                    }
                 }
             }
         }
+    }
+    if restore {
+        let dpy = LAST_DISPLAY.load(Ordering::Relaxed) as *mut Display;
+        let win = LAST_WINDOW.load(Ordering::Relaxed) as Window;
+        restore_cursor_for_game(dpy, win);
     }
 }
 
@@ -522,9 +645,7 @@ fn handle_key_passive_fast(dpy: *mut Display, keycode: c_uint, pressed: bool) {
         if match_xray {
             if pressed && !st.xray_key_down {
                 st.xray_key_down = true;
-                let next = !(st.config.xray_terrain || st.config.xray_entities);
-                st.config.xray_terrain = next;
-                st.config.xray_entities = next;
+                st.config.xray_ores = !st.config.xray_ores;
                 let _ = st.config.save();
             } else if !pressed {
                 st.xray_key_down = false;
@@ -789,6 +910,67 @@ pub unsafe extern "C" fn hook_XDefineCursor(
         1
     }
 }
+pub unsafe extern "C" fn hook_xcb_change_window_attributes(
+    conn: *mut XcbConnection,
+    window: u32,
+    value_mask: u32,
+    value_list: *const c_void,
+) -> u32 {
+    if !conn.is_null() {
+        LAST_XCB_CONN.store(conn as usize, Ordering::Relaxed);
+    }
+    if window != 0 {
+        LAST_WINDOW.store(window as usize, Ordering::Relaxed);
+    }
+    const CW_CURSOR: u32 = 1 << 14;
+    if (value_mask & CW_CURSOR) != 0 && !value_list.is_null() {
+        let idx = (value_mask & (CW_CURSOR - 1)).count_ones() as usize;
+        let cur = unsafe { *(value_list as *const u32).add(idx) };
+        if cur != ARROW_CURSOR.load(Ordering::Relaxed) as u32 {
+            SAVED_GAME_CURSOR.store(cur as usize, Ordering::Relaxed);
+        }
+        if ui_capturing() {
+            // Keep arrow cursor visible while UI is open
+            return 0;
+        }
+    }
+    if let Some(real) = resolve_x11().xcb_change_window_attributes {
+        unsafe { real(conn, window, value_mask, value_list as *const u32) }
+    } else {
+        0
+    }
+}
+
+pub unsafe extern "C" fn hook_xcb_change_window_attributes_checked(
+    conn: *mut XcbConnection,
+    window: u32,
+    value_mask: u32,
+    value_list: *const c_void,
+) -> u32 {
+    if !conn.is_null() {
+        LAST_XCB_CONN.store(conn as usize, Ordering::Relaxed);
+    }
+    if window != 0 {
+        LAST_WINDOW.store(window as usize, Ordering::Relaxed);
+    }
+    const CW_CURSOR: u32 = 1 << 14;
+    if (value_mask & CW_CURSOR) != 0 && !value_list.is_null() {
+        let idx = (value_mask & (CW_CURSOR - 1)).count_ones() as usize;
+        let cur = unsafe { *(value_list as *const u32).add(idx) };
+        if cur != ARROW_CURSOR.load(Ordering::Relaxed) as u32 {
+            SAVED_GAME_CURSOR.store(cur as usize, Ordering::Relaxed);
+        }
+        if ui_capturing() {
+            return 0;
+        }
+    }
+    if let Some(real) = resolve_x11().xcb_change_window_attributes_checked {
+        unsafe { real(conn, window, value_mask, value_list as *const u32) }
+    } else {
+        0
+    }
+}
+
 
 pub unsafe extern "C" fn hook_XGrabPointer(
     display: *mut Display,
@@ -844,6 +1026,9 @@ pub unsafe extern "C" fn hook_xcb_grab_pointer(
     cursor: u32,
     time: u32,
 ) -> u32 {
+    if !conn.is_null() {
+        LAST_XCB_CONN.store(conn as usize, Ordering::Relaxed);
+    }
     if grab_window != 0 {
         LAST_WINDOW.store(grab_window as usize, Ordering::Relaxed);
     }

@@ -15,6 +15,48 @@ pub struct RadarEntity {
     pub distance: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OreKind {
+    Diamond,
+    Debris,
+    Emerald,
+    Gold,
+    Iron,
+    Lapis,
+    Redstone,
+    Coal,
+    Copper,
+    Quartz,
+    Chest,
+    Spawner,
+}
+
+impl OreKind {
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Diamond => "Diamond",
+            Self::Debris => "Debris",
+            Self::Emerald => "Emerald",
+            Self::Gold => "Gold",
+            Self::Iron => "Iron",
+            Self::Lapis => "Lapis",
+            Self::Redstone => "Redstone",
+            Self::Coal => "Coal",
+            Self::Copper => "Copper",
+            Self::Quartz => "Quartz",
+            Self::Chest => "Chest",
+            Self::Spawner => "Spawner",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OreMarker {
+    pub pos: [i32; 3],
+    pub kind: OreKind,
+    pub distance: f64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LiveGameState {
     pub socket_connected: bool,
@@ -24,6 +66,7 @@ pub struct LiveGameState {
     pub dimension: String,
     pub pos: [f64; 3],
     pub yaw: f32,
+    pub eye: [f64; 3],
     pub pitch: f32,
     pub health: f32,
     pub absorption: f32,
@@ -52,6 +95,7 @@ pub struct LiveGameState {
     pub hotbar_items: [Option<String>; 9],
     pub first_totem_slot: Option<usize>,
     pub nearby_entities: Vec<RadarEntity>,
+    pub ore_markers: Vec<OreMarker>,
     pub horizon_gamma: Option<f32>,
     pub base_fov: Option<u32>,
 }
@@ -183,6 +227,17 @@ fn parse_state(v: &Value, dst: &mut LiveGameState) {
                 arr[1].as_f64().unwrap_or(0.0),
                 arr[2].as_f64().unwrap_or(0.0),
             ];
+        }
+        if let Some(arr) = p.get("eye").and_then(|x| x.as_array())
+            && arr.len() >= 3
+        {
+            dst.eye = [
+                arr[0].as_f64().unwrap_or(dst.pos[0]),
+                arr[1].as_f64().unwrap_or(dst.pos[1] + 1.62),
+                arr[2].as_f64().unwrap_or(dst.pos[2]),
+            ];
+        } else {
+            dst.eye = [dst.pos[0], dst.pos[1] + 1.62, dst.pos[2]];
         }
         dst.yaw = p.get("yaw").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
         dst.pitch = p.get("pitch").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
@@ -349,6 +404,10 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     let mut last_inv = Instant::now() - Duration::from_secs(5);
     let mut last_ent = Instant::now() - Duration::from_secs(5);
     let mut last_opts = Instant::now() - Duration::from_secs(10);
+    let mut last_ores = Instant::now() - Duration::from_secs(5);
+    let mut ore_scan_idx: usize = 0;
+    let mut ore_cache: std::collections::HashMap<String, Vec<OreMarker>> =
+        std::collections::HashMap::new();
     let mut saved_fov: Option<u32> = None;
     let mut zoomed_active = false;
 
@@ -474,6 +533,59 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
                 conn = None;
                 continue;
             }
+        }
+
+        if live_snapshot.in_world && cfg.xray_ores {
+            if last_ores.elapsed() >= Duration::from_millis(160) {
+                last_ores = Instant::now();
+                let targets = ore_targets_for(&live_snapshot.dimension, cfg.xray_ore_preset);
+                let rad = cfg.xray_radius.clamp(12, 48);
+                let mut lost_conn = false;
+                for _ in 0..2 {
+                    if targets.is_empty() {
+                        break;
+                    }
+                    let (block_id, kind) = targets[ore_scan_idx % targets.len()];
+                    ore_scan_idx = ore_scan_idx.wrapping_add(1);
+                    if let Some(v) = send_line(reader, writer, &format!("find-block {block_id} {rad}")) {
+                        let mut list = Vec::new();
+                        if let Some(arr) = v.get("nearest").and_then(|x| x.as_array()) {
+                            for item in arr {
+                                if let Some(p) = item.get("pos").and_then(|x| x.as_array())
+                                    && p.len() >= 3
+                                {
+                                    let pos = [
+                                        p[0].as_i64().unwrap_or(0) as i32,
+                                        p[1].as_i64().unwrap_or(0) as i32,
+                                        p[2].as_i64().unwrap_or(0) as i32,
+                                    ];
+                                    let d = item["distance"].as_f64().unwrap_or(0.0);
+                                    list.push(OreMarker { pos, kind, distance: d });
+                                }
+                            }
+                        }
+                        ore_cache.insert(block_id.to_string(), list);
+                    } else {
+                        lost_conn = true;
+                        break;
+                    }
+                }
+                if lost_conn {
+                    conn = None;
+                    continue;
+                }
+                let mut merged: Vec<OreMarker> = ore_cache
+                    .iter()
+                    .filter(|(k, _)| targets.iter().any(|(bid, _)| bid == &k.as_str()))
+                    .flat_map(|(_, v)| v.iter().copied())
+                    .collect();
+                merged.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+                merged.truncate(64);
+                live_snapshot.ore_markers = merged;
+            }
+        } else if !live_snapshot.ore_markers.is_empty() {
+            live_snapshot.ore_markers.clear();
+            ore_cache.clear();
         }
 
         if last_opts.elapsed() >= Duration::from_secs(3) {
@@ -629,5 +741,59 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
         }
 
         std::thread::sleep(Duration::from_millis(130));
+    }
+}
+
+fn ore_targets_for(
+    dimension: &str,
+    preset: crate::config::OrePreset,
+) -> &'static [(&'static str, OreKind)] {
+    if dimension.contains("nether") {
+        match preset {
+            crate::config::OrePreset::Valuable => &[
+                ("minecraft:ancient_debris", OreKind::Debris),
+                ("minecraft:nether_gold_ore", OreKind::Gold),
+                ("minecraft:chest", OreKind::Chest),
+                ("minecraft:spawner", OreKind::Spawner),
+            ],
+            crate::config::OrePreset::All => &[
+                ("minecraft:ancient_debris", OreKind::Debris),
+                ("minecraft:nether_gold_ore", OreKind::Gold),
+                ("minecraft:nether_quartz_ore", OreKind::Quartz),
+                ("minecraft:chest", OreKind::Chest),
+                ("minecraft:spawner", OreKind::Spawner),
+            ],
+        }
+    } else {
+        match preset {
+            crate::config::OrePreset::Valuable => &[
+                ("minecraft:diamond_ore", OreKind::Diamond),
+                ("minecraft:deepslate_diamond_ore", OreKind::Diamond),
+                ("minecraft:emerald_ore", OreKind::Emerald),
+                ("minecraft:deepslate_emerald_ore", OreKind::Emerald),
+                ("minecraft:gold_ore", OreKind::Gold),
+                ("minecraft:deepslate_gold_ore", OreKind::Gold),
+                ("minecraft:chest", OreKind::Chest),
+                ("minecraft:spawner", OreKind::Spawner),
+            ],
+            crate::config::OrePreset::All => &[
+                ("minecraft:diamond_ore", OreKind::Diamond),
+                ("minecraft:deepslate_diamond_ore", OreKind::Diamond),
+                ("minecraft:emerald_ore", OreKind::Emerald),
+                ("minecraft:deepslate_emerald_ore", OreKind::Emerald),
+                ("minecraft:gold_ore", OreKind::Gold),
+                ("minecraft:deepslate_gold_ore", OreKind::Gold),
+                ("minecraft:iron_ore", OreKind::Iron),
+                ("minecraft:deepslate_iron_ore", OreKind::Iron),
+                ("minecraft:lapis_ore", OreKind::Lapis),
+                ("minecraft:deepslate_lapis_ore", OreKind::Lapis),
+                ("minecraft:redstone_ore", OreKind::Redstone),
+                ("minecraft:deepslate_redstone_ore", OreKind::Redstone),
+                ("minecraft:copper_ore", OreKind::Copper),
+                ("minecraft:coal_ore", OreKind::Coal),
+                ("minecraft:chest", OreKind::Chest),
+                ("minecraft:spawner", OreKind::Spawner),
+            ],
+        }
     }
 }

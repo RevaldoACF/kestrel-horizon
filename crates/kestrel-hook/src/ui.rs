@@ -1,4 +1,4 @@
-use crate::config::{CrosshairStyle, FullbrightMode, KestrelConfig, Waypoint, XrayKey, ZoomKey};
+use crate::config::{CrosshairStyle, FullbrightMode, KestrelConfig, OrePreset, Waypoint, XrayKey, ZoomKey};
 use crate::control_bridge::{send_cmd, ControlCmd};
 use crate::draw::{palette, Color, DrawList, Rect};
 use crate::font::{FontAtlas, FontKind};
@@ -568,8 +568,8 @@ fn render_survival_tab(
 
     y += card_h + 16.0;
 
-    // X-Ray Vision Card (Cave Wireframe + Chest/Mobs ESP)
-    let x_rect = Rect::new(x, y, w, 126.0);
+    // X-Ray Vision Card (Ore 3D ESP + Cave Wireframe + Chest/Mobs ESP)
+    let x_rect = Rect::new(x, y, w, 178.0);
     dl.rect_border(x_rect, 10.0, palette::SURFACE, 1.0, palette::BORDER);
     dl.text(
         atlas,
@@ -584,61 +584,85 @@ fn render_survival_tab(
         FontKind::UiSmall,
         x_rect.x + 16.0,
         x_rect.y + 38.0,
-        "Swaps Vulkan terrain to wireframe cave view and renders chests/mobs through walls.",
+        "3D Ore ESP highlights buried ores; Cave Wireframe & ESP reveal tunnels and chests.",
         palette::TEXT_SECONDARY,
     );
 
-    let x_half = (w - 46.0) * 0.5;
-    let xt_row = Rect::new(x_rect.x + 16.0, x_rect.y + 62.0, x_half, 30.0);
-    dl.text(
-        atlas,
-        FontKind::UiSemi,
-        xt_row.x,
-        xt_row.y + 6.0,
-        "Cave Wireframe",
-        palette::TEXT_PRIMARY,
-    );
+    let x_third = (w - 56.0) / 3.0;
+    let xo_row = Rect::new(x_rect.x + 16.0, x_rect.y + 62.0, x_third, 30.0);
+    dl.text(atlas, FontKind::UiSemi, xo_row.x, xo_row.y + 6.0, "Ore X-Ray", palette::TEXT_PRIMARY);
     draw_toggle_pill(
         st,
         dl,
         atlas,
-        Rect::new(xt_row.x + xt_row.w - 66.0, xt_row.y, 66.0, 28.0),
+        Rect::new(xo_row.x + xo_row.w - 60.0, xo_row.y, 60.0, 28.0),
+        st.config.xray_ores,
+        FocusId::XrayOresToggle,
+        focusables,
+    );
+
+    let xt_row = Rect::new(x_rect.x + 28.0 + x_third, x_rect.y + 62.0, x_third, 30.0);
+    dl.text(atlas, FontKind::UiSemi, xt_row.x, xt_row.y + 6.0, "Caves", palette::TEXT_PRIMARY);
+    draw_toggle_pill(
+        st,
+        dl,
+        atlas,
+        Rect::new(xt_row.x + xt_row.w - 60.0, xt_row.y, 60.0, 28.0),
         st.config.xray_terrain,
         FocusId::XrayTerrainToggle,
         focusables,
     );
 
-    let xe_row = Rect::new(x_rect.x + 30.0 + x_half, x_rect.y + 62.0, x_half, 30.0);
-    dl.text(
-        atlas,
-        FontKind::UiSemi,
-        xe_row.x,
-        xe_row.y + 6.0,
-        "Chests & Mobs ESP",
-        palette::TEXT_PRIMARY,
-    );
+    let xe_row = Rect::new(x_rect.x + 40.0 + x_third * 2.0, x_rect.y + 62.0, x_third, 30.0);
+    dl.text(atlas, FontKind::UiSemi, xe_row.x, xe_row.y + 6.0, "Chest/Mob", palette::TEXT_PRIMARY);
     draw_toggle_pill(
         st,
         dl,
         atlas,
-        Rect::new(xe_row.x + xe_row.w - 66.0, xe_row.y, 66.0, 28.0),
+        Rect::new(xe_row.x + xe_row.w - 60.0, xe_row.y, 60.0, 28.0),
         st.config.xray_entities,
         FocusId::XrayEntitiesToggle,
         focusables,
     );
 
+    let x_half = (w - 46.0) * 0.5;
     draw_cycle_row(
         st,
         dl,
         atlas,
-        Rect::new(x_rect.x + 16.0, x_rect.y + 98.0, w - 32.0, 22.0),
-        "Quick Toggle Hotkey",
+        Rect::new(x_rect.x + 16.0, x_rect.y + 100.0, x_half, 28.0),
+        "Ore Filter",
+        st.config.xray_ore_preset.label(),
+        FocusId::XrayOrePresetCycle,
+        focusables,
+    );
+    draw_cycle_row(
+        st,
+        dl,
+        atlas,
+        Rect::new(x_rect.x + 30.0 + x_half, x_rect.y + 100.0, x_half, 28.0),
+        "Hotkey (Ore)",
         st.config.xray_key.label(),
         FocusId::XrayKeyCycle,
         focusables,
     );
 
-    y += 140.0;
+    draw_slider(
+        st,
+        dl,
+        atlas,
+        Rect::new(x_rect.x + 16.0, x_rect.y + 132.0, w - 32.0, 42.0),
+        "Ore Scan Radius",
+        &format!("{} blocks", st.config.xray_radius),
+        st.config.xray_radius as f32,
+        12.0,
+        48.0,
+        4.0,
+        FocusId::XrayRadiusSlider,
+        focusables,
+    );
+
+    y += 192.0;
 
     // Compact bottom strip: Horizon Vanilla Gamma Sync
     let g_rect = Rect::new(x, y, w, 72.0);
@@ -1281,8 +1305,9 @@ fn render_search_results(
     );
     y += 24.0;
 
-    let items: [(&str, &str, bool, FocusId); 18] = [
+    let items: [(&str, &str, bool, FocusId); 19] = [
         ("Fullbright", "GPU 16x16 lightmap override", st.config.fullbright_enabled, FocusId::FullbrightToggle),
+        ("Ore X-Ray (3D ESP)", "Highlight Diamond, Debris, Gold, Iron through stone", st.config.xray_ores, FocusId::XrayOresToggle),
         ("X-Ray Cave Wireframe", "See caves, lava, mineshafts through stone", st.config.xray_terrain, FocusId::XrayTerrainToggle),
         ("X-Ray Chests & Mobs", "Render chests, players, mobs through walls", st.config.xray_entities, FocusId::XrayEntitiesToggle),
         ("Entity Radar", "Rotating minimap of nearby mobs, players, items", st.config.hud_radar.enabled, FocusId::HudToggleRadar),
@@ -1932,6 +1957,9 @@ fn apply_slider_pos(
         FocusId::TriggerBotDelaySlider => {
             st.config.trigger_bot_delay_ms = snapped.round() as u32;
         }
+        FocusId::XrayRadiusSlider => {
+            st.config.xray_radius = snapped.round() as i32;
+        }
         FocusId::AutoClickerCpsSlider => {
             st.config.auto_clicker_cps = snapped.round() as u32;
         }
@@ -1969,6 +1997,10 @@ fn nudge_slider(st: &mut AppState, fid: FocusId, delta: f32, min: f32, max: f32)
             let next = (st.config.trigger_bot_delay_ms as f32 + delta).clamp(min, max);
             st.config.trigger_bot_delay_ms = next.round() as u32;
         }
+        FocusId::XrayRadiusSlider => {
+            let next = (st.config.xray_radius as f32 + delta).clamp(min, max);
+            st.config.xray_radius = next.round() as i32;
+        }
         FocusId::AutoClickerCpsSlider => {
             let next = (st.config.auto_clicker_cps as f32 + delta).clamp(min, max);
             st.config.auto_clicker_cps = next.round() as u32;
@@ -1993,6 +2025,7 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.fullbright_enabled = false;
             st.config.xray_terrain = false;
             st.config.xray_entities = false;
+            st.config.xray_ores = false;
             st.config.auto_sprint = false;
             st.config.auto_respawn = false;
             st.config.auto_eat = false;
@@ -2048,6 +2081,15 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         }
         FocusId::XrayTerrainToggle => {
             st.config.xray_terrain = !st.config.xray_terrain;
+        }
+        FocusId::XrayOresToggle => {
+            st.config.xray_ores = !st.config.xray_ores;
+        }
+        FocusId::XrayOrePresetCycle => {
+            st.config.xray_ore_preset = match st.config.xray_ore_preset {
+                OrePreset::Valuable => OrePreset::All,
+                OrePreset::All => OrePreset::Valuable,
+            };
         }
         FocusId::XrayEntitiesToggle => {
             st.config.xray_entities = !st.config.xray_entities;
@@ -2158,6 +2200,7 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         | FocusId::CrosshairSizeSlider
         | FocusId::CrosshairGapSlider
         | FocusId::GammaSlider
+        | FocusId::XrayRadiusSlider
         | FocusId::AutoEatHungerSlider
         | FocusId::TriggerBotDelaySlider
         | FocusId::AutoClickerCpsSlider => {

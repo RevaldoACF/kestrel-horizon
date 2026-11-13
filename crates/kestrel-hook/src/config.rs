@@ -41,6 +41,21 @@ impl XrayKey {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrePreset {
+    Valuable,
+    All,
+}
+
+impl OrePreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Valuable => "Valuable",
+            Self::All => "All Ores",
+        }
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrosshairStyle {
@@ -89,6 +104,9 @@ pub struct KestrelConfig {
     pub xray_terrain: bool,
     pub xray_entities: bool,
     pub xray_key: XrayKey,
+    pub xray_ores: bool,
+    pub xray_ore_preset: OrePreset,
+    pub xray_radius: i32,
 
     pub zoom_enabled: bool,
     pub zoom_fov: u32,
@@ -131,6 +149,9 @@ impl Default for KestrelConfig {
             xray_terrain: false,
             xray_entities: false,
             xray_key: XrayKey::X,
+            xray_ores: false,
+            xray_ore_preset: OrePreset::Valuable,
+            xray_radius: 28,
 
             fullbright_strength: 1.0,
 

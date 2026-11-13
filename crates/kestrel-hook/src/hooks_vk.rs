@@ -29,6 +29,8 @@ static REAL_DESTROY_BUFFER: OnceLock<vk::PFN_vkDestroyBuffer> = OnceLock::new();
 static REAL_BIND_BUFFER_MEM: OnceLock<vk::PFN_vkBindBufferMemory> = OnceLock::new();
 static REAL_MAP_MEMORY: OnceLock<vk::PFN_vkMapMemory> = OnceLock::new();
 static REAL_UNMAP_MEMORY: OnceLock<vk::PFN_vkUnmapMemory> = OnceLock::new();
+static REAL_CREATE_BUFFER: OnceLock<vk::PFN_vkCreateBuffer> = OnceLock::new();
+static REAL_CMD_COPY_BUFFER: OnceLock<vk::PFN_vkCmdCopyBuffer> = OnceLock::new();
 static REAL_FREE_MEMORY: OnceLock<vk::PFN_vkFreeMemory> = OnceLock::new();
 static REAL_CMD_COPY_B2I: OnceLock<vk::PFN_vkCmdCopyBufferToImage> = OnceLock::new();
 static REAL_CREATE_GRAPHICS_PIPELINES: OnceLock<vk::PFN_vkCreateGraphicsPipelines> =
@@ -41,9 +43,19 @@ static XRAY_TERRAIN_ON: AtomicBool = AtomicBool::new(false);
 static XRAY_ENTITIES_ON: AtomicBool = AtomicBool::new(false);
 static LIGHTMAP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-pub fn sync_xray_flags(terrain: bool, entities: bool) {
+static XRAY_ORES_ON: AtomicBool = AtomicBool::new(false);
+
+pub fn sync_xray_flags(terrain: bool, entities: bool, ores: bool) {
     XRAY_TERRAIN_ON.store(terrain, Ordering::Relaxed);
     XRAY_ENTITIES_ON.store(entities, Ordering::Relaxed);
+    XRAY_ORES_ON.store(ores, Ordering::Relaxed);
+}
+
+static LATEST_VIEW_PROJ: LazyLock<RwLock<Option<[[f32; 4]; 4]>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+pub fn latest_view_proj() -> Option<[[f32; 4]; 4]> {
+    *LATEST_VIEW_PROJ.read()
 }
 
 struct InstanceTrack {
@@ -65,6 +77,7 @@ struct VkTracking {
     last_normal_lightmap: [u8; 1024],
     mapped_memory: HashMap<u64, *mut u8>,
     buffer_bindings: HashMap<u64, BufferBinding>,
+    globals_buffers: Vec<u64>,
 }
 
 unsafe impl Send for VkTracking {}
@@ -78,6 +91,7 @@ static VK: LazyLock<Mutex<VkTracking>> = LazyLock::new(|| {
         last_normal_lightmap: [255u8; 1024],
         mapped_memory: HashMap::new(),
         buffer_bindings: HashMap::new(),
+        globals_buffers: Vec::new(),
     })
 });
 
@@ -223,6 +237,14 @@ fn maybe_intercept_device_fn(
             b"vkDestroyImage" => {
                 let _ = REAL_DESTROY_IMAGE.set(std::mem::transmute(rf));
                 fn_ptr(hook_vkDestroyImage as vk::PFN_vkDestroyImage)
+            }
+            b"vkCreateBuffer" => {
+                let _ = REAL_CREATE_BUFFER.set(std::mem::transmute(rf));
+                fn_ptr(hook_vkCreateBuffer as vk::PFN_vkCreateBuffer)
+            }
+            b"vkCmdCopyBuffer" => {
+                let _ = REAL_CMD_COPY_BUFFER.set(std::mem::transmute(rf));
+                fn_ptr(hook_vkCmdCopyBuffer as vk::PFN_vkCmdCopyBuffer)
             }
             b"vkDestroyBuffer" => {
                 let _ = REAL_DESTROY_BUFFER.set(std::mem::transmute(rf));
@@ -444,6 +466,7 @@ unsafe extern "system" fn hook_vkDestroyDevice(
             vk_st.active_device = 0;
             vk_st.lightmap_images.clear();
             LIGHTMAP_COUNT.store(0, Ordering::Relaxed);
+            vk_st.globals_buffers.clear();
             XRAY_TERRAIN_MAP.write().clear();
             XRAY_ENTITY_MAP.write().clear();
             true
@@ -625,13 +648,70 @@ unsafe extern "system" fn hook_vkDestroyImage(
     }
 }
 
+unsafe extern "system" fn hook_vkCreateBuffer(
+    device: vk::Device,
+    p_create_info: *const vk::BufferCreateInfo<'_>,
+    p_allocator: *const vk::AllocationCallbacks<'_>,
+    p_buffer: *mut vk::Buffer,
+) -> vk::Result {
+    let real = *REAL_CREATE_BUFFER.get().expect("real_create_buffer");
+    let res = unsafe { real(device, p_create_info, p_allocator, p_buffer) };
+    if res == vk::Result::SUCCESS && !p_create_info.is_null() && !p_buffer.is_null() {
+        let ci = unsafe { &*p_create_info };
+        if ci.usage.contains(vk::BufferUsageFlags::UNIFORM_BUFFER)
+            && ci.size >= 3500
+            && ci.size <= 4600
+        {
+            VK.lock().globals_buffers.push(unsafe { *p_buffer }.as_raw());
+        }
+    }
+    res
+}
+
+unsafe extern "system" fn hook_vkCmdCopyBuffer(
+    command_buffer: vk::CommandBuffer,
+    src_buffer: vk::Buffer,
+    dst_buffer: vk::Buffer,
+    region_count: u32,
+    p_regions: *const vk::BufferCopy,
+) {
+    if XRAY_ORES_ON.load(Ordering::Relaxed) && region_count > 0 && !p_regions.is_null() {
+        let regions = unsafe { std::slice::from_raw_parts(p_regions, region_count as usize) };
+        let vk_st = VK.lock();
+        if vk_st.globals_buffers.contains(&dst_buffer.as_raw()) {
+            for reg in regions {
+                if reg.dst_offset == 0
+                    && reg.size >= 64
+                    && let Some(binding) = vk_st.buffer_bindings.get(&src_buffer.as_raw()).copied()
+                    && let Some(&base_ptr) = vk_st.mapped_memory.get(&binding.memory)
+                {
+                    let src_ptr = unsafe {
+                        base_ptr.add(binding.offset as usize + reg.src_offset as usize)
+                    };
+                    let mut mat = [[0.0f32; 4]; 4];
+                    unsafe {
+                        ptr::copy_nonoverlapping(src_ptr, mat.as_mut_ptr() as *mut u8, 64);
+                    }
+                    *LATEST_VIEW_PROJ.write() = Some(mat);
+                }
+            }
+        }
+    }
+    if let Some(f) = REAL_CMD_COPY_BUFFER.get() {
+        unsafe { f(command_buffer, src_buffer, dst_buffer, region_count, p_regions) };
+    }
+}
+
 unsafe extern "system" fn hook_vkDestroyBuffer(
     device: vk::Device,
     buffer: vk::Buffer,
     p_allocator: *const vk::AllocationCallbacks<'_>,
 ) {
     {
-        VK.lock().buffer_bindings.remove(&buffer.as_raw());
+        let mut vk_st = VK.lock();
+        let raw = buffer.as_raw();
+        vk_st.buffer_bindings.remove(&raw);
+        vk_st.globals_buffers.retain(|&x| x != raw);
     }
     if let Some(f) = REAL_DESTROY_BUFFER.get() {
         unsafe { f(device, buffer, p_allocator) };

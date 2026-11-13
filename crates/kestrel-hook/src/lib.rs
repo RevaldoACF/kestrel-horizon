@@ -85,6 +85,16 @@ pub unsafe extern "C" fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *m
                 return hooks_x11::hook_xcb_grab_pointer as *mut c_void;
             }
         }
+        b"xcb_change_window_attributes" => {
+            if !real.is_null() {
+                return hooks_x11::hook_xcb_change_window_attributes as *mut c_void;
+            }
+        }
+        b"xcb_change_window_attributes_checked" => {
+            if !real.is_null() {
+                return hooks_x11::hook_xcb_change_window_attributes_checked as *mut c_void;
+            }
+        }
         b"xcb_ungrab_pointer" => {
             if !real.is_null() {
                 return hooks_x11::hook_xcb_ungrab_pointer as *mut c_void;

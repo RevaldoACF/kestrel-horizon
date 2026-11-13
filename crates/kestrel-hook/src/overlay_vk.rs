@@ -441,7 +441,11 @@ impl VulkanOverlay {
             st.key_d = (mask & 8) != 0;
             st.key_space = (mask & 16) != 0;
 
-            sync_xray_flags(st.config.xray_terrain, st.config.xray_entities);
+            sync_xray_flags(
+                st.config.xray_terrain,
+                st.config.xray_entities,
+                st.config.xray_ores,
+            );
 
             self.draw_list.clear(extent.width, extent.height);
             render_hud(&mut st, &mut self.draw_list, &self.atlas);
