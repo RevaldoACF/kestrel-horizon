@@ -168,6 +168,13 @@ pub struct KestrelConfig {
     pub aim_smooth: f32,
     pub criticals_enabled: bool,
 
+    // KillAura
+    pub killaura_enabled: bool,
+    pub killaura_target: AimTarget,
+    pub killaura_range: f32,
+    pub killaura_fov: f32,
+    pub killaura_delay_ms: u32,
+
 
     pub zoom_enabled: bool,
     pub zoom_fov: u32,
@@ -235,6 +242,12 @@ impl Default for KestrelConfig {
             aim_range: 4.5,
             aim_smooth: 0.45,
             criticals_enabled: false,
+
+            killaura_enabled: false,
+            killaura_target: AimTarget::Both,
+            killaura_range: 4.0,
+            killaura_fov: 360.0,
+            killaura_delay_ms: 625,
 
 
             fullbright_strength: 1.0,

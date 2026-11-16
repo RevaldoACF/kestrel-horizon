@@ -450,6 +450,7 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     let mut last_eat = Instant::now() - Duration::from_secs(5);
     let mut last_totem = Instant::now() - Duration::from_secs(5);
     let mut last_trigger = Instant::now() - Duration::from_secs(5);
+    let mut last_killaura = Instant::now() - Duration::from_secs(5);
     let mut last_clicker = Instant::now() - Duration::from_secs(5);
     let mut last_move_pos: Option<[f64; 3]> = None;
     let mut last_move_at = Instant::now();
@@ -579,8 +580,10 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             || cfg.auto_fish
             || cfg.esp_enabled
             || cfg.tracers_enabled
-            || cfg.aim_assist;
-        let ent_interval = match (cfg.aim_assist, cfg.perf_profile) {
+            || cfg.aim_assist
+            || cfg.killaura_enabled;
+        let fast_entities = cfg.aim_assist || cfg.killaura_enabled;
+        let ent_interval = match (fast_entities, cfg.perf_profile) {
             (true, crate::config::PerfProfile::Full) => Duration::from_millis(85),
             (true, _) => Duration::from_millis(105),
             (false, crate::config::PerfProfile::Full) => Duration::from_millis(160),
@@ -1020,39 +1023,62 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             }
         }
 
-        // 9. AimAssist
-        if cfg.aim_assist && playing_now && !cfg.freecam_enabled {
+        // 9. KillAura
+        let mut killaura_engaged = false;
+        if cfg.killaura_enabled && playing_now && !cfg.freecam_enabled {
+            let mut best: Option<(f64, f32, f32)> = None;
+            let eye = live_snapshot.eye;
+            for e in &live_snapshot.nearby_entities {
+                if e.kind != "mob"
+                    || e.distance > f64::from(cfg.killaura_range)
+                    || e.distance < 0.25
+                    || e.health.is_some_and(|h| h <= 0.0)
+                    || !matches_aim_target(&e.label, cfg.killaura_target)
+                {
+                    continue;
+                }
+                let (_ang, dyaw, dpitch) =
+                    compute_aim_angles(eye, e.pos, live_snapshot.yaw, live_snapshot.pitch);
+                let in_fov = cfg.killaura_fov >= 359.0 || dyaw.abs() <= cfg.killaura_fov * 0.5;
+                if in_fov && best.is_none_or(|b| e.distance < b.0) {
+                    best = Some((e.distance, dyaw, dpitch));
+                }
+            }
+            if let Some((_, dyaw, dpitch)) = best {
+                killaura_engaged = true;
+                if last_killaura.elapsed() >= Duration::from_millis(cfg.killaura_delay_ms as u64) {
+                    last_killaura = Instant::now();
+                    if dyaw.abs() > 2.5 || dpitch.abs() > 2.5 {
+                        if send_line(reader, writer, &format!("turn {dyaw:.2} {dpitch:.2} --over 0.02")).is_none() {
+                            conn = None;
+                            continue;
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    if cfg.criticals_enabled && live_snapshot.on_ground {
+                        perform_crit_attack(reader, writer, true, live_snapshot.sprinting);
+                    } else if send_line(reader, writer, "mouse left click").is_none() {
+                        conn = None;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 10. AimAssist
+        if cfg.aim_assist && !killaura_engaged && playing_now && !cfg.freecam_enabled {
             let mut best: Option<(f32, f32, f32)> = None;
             let eye = live_snapshot.eye;
             for e in &live_snapshot.nearby_entities {
-                if e.kind != "mob" || e.distance > f64::from(cfg.aim_range) || e.distance < 0.35 {
+                if e.kind != "mob"
+                    || e.distance > f64::from(cfg.aim_range)
+                    || e.distance < 0.35
+                    || !matches_aim_target(&e.label, cfg.aim_target)
+                {
                     continue;
                 }
-                let is_player = e.label == "minecraft:player";
-                let is_hostile = is_hostile_mob_id(&e.label);
-                let allowed = match cfg.aim_target {
-                    crate::config::AimTarget::Players => is_player,
-                    crate::config::AimTarget::Hostile => !is_player && is_hostile,
-                    crate::config::AimTarget::Both => is_player || is_hostile,
-                };
-                if !allowed {
-                    continue;
-                }
-                let dx = e.pos[0] - eye[0];
-                let dy = (e.pos[1] + 1.05) - eye[1];
-                let dz = e.pos[2] - eye[2];
-                let horiz = (dx * dx + dz * dz).sqrt().max(0.001);
-                let target_yaw = (-dx).atan2(dz).to_degrees() as f32;
-                let target_pitch = (-dy).atan2(horiz).to_degrees() as f32;
-                let mut dyaw = (target_yaw - live_snapshot.yaw) % 360.0;
-                if dyaw > 180.0 {
-                    dyaw -= 360.0;
-                }
-                if dyaw < -180.0 {
-                    dyaw += 360.0;
-                }
-                let dpitch = target_pitch - live_snapshot.pitch;
-                let ang = (dyaw * dyaw + dpitch * dpitch).sqrt();
+                let (ang, dyaw, dpitch) =
+                    compute_aim_angles(eye, e.pos, live_snapshot.yaw, live_snapshot.pitch);
                 if ang <= cfg.aim_fov && ang > 1.2 && best.is_none_or(|b| ang < b.0) {
                     best = Some((ang, dyaw, dpitch));
                 }
@@ -1073,7 +1099,14 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
             st.game = live_snapshot;
         }
 
-        let sleep_ms = if cfg.aim_assist || cfg.trigger_bot || cfg.auto_clicker || cfg.auto_mine || cfg.speed_mine || cfg.auto_tool {
+        let sleep_ms = if cfg.aim_assist
+            || cfg.killaura_enabled
+            || cfg.trigger_bot
+            || cfg.auto_clicker
+            || cfg.auto_mine
+            || cfg.speed_mine
+            || cfg.auto_tool
+        {
             85
         } else {
             160
@@ -1082,6 +1115,40 @@ fn bridge_loop(rx: mpsc::Receiver<ControlCmd>) {
     }
 }
 
+
+fn matches_aim_target(label: &str, target: crate::config::AimTarget) -> bool {
+    let is_player = label == "minecraft:player";
+    let is_hostile = is_hostile_mob_id(label);
+    match target {
+        crate::config::AimTarget::Players => is_player,
+        crate::config::AimTarget::Hostile => !is_player && is_hostile,
+        crate::config::AimTarget::Both => is_player || is_hostile,
+    }
+}
+
+fn compute_aim_angles(
+    eye: [f64; 3],
+    target_pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+) -> (f32, f32, f32) {
+    let dx = target_pos[0] - eye[0];
+    let dy = (target_pos[1] + 1.05) - eye[1];
+    let dz = target_pos[2] - eye[2];
+    let horiz = (dx * dx + dz * dz).sqrt().max(0.001);
+    let target_yaw = (-dx).atan2(dz).to_degrees() as f32;
+    let target_pitch = (-dy).atan2(horiz).to_degrees() as f32;
+    let mut dyaw = (target_yaw - yaw) % 360.0;
+    if dyaw > 180.0 {
+        dyaw -= 360.0;
+    }
+    if dyaw < -180.0 {
+        dyaw += 360.0;
+    }
+    let dpitch = target_pitch - pitch;
+    let ang = (dyaw * dyaw + dpitch * dpitch).sqrt();
+    (ang, dyaw, dpitch)
+}
 
 fn perform_crit_attack(
     reader: &mut BufReader<UnixStream>,

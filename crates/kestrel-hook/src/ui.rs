@@ -809,6 +809,77 @@ fn render_automation_tab(
         x,
         y,
         w,
+        "KillAura",
+        "Automatically turns and attacks nearby targets",
+        st.config.killaura_enabled,
+        FocusId::KillAuraToggle,
+        focusables,
+    );
+    let (ix, iy, iw, next_y) = draw_inset_bg(dl, x, y, w, 82.0);
+    {
+        draw_cycle_chip(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 6.0, iw, 26.0),
+            "Targets",
+            st.config.killaura_target.label(),
+            FocusId::KillAuraTargetCycle,
+            focusables,
+        );
+        let third = (iw - 24.0) / 3.0;
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix, iy + 38.0, third, 40.0),
+            "Range",
+            &format!("{:.1}m", st.config.killaura_range),
+            st.config.killaura_range,
+            2.5,
+            6.0,
+            0.5,
+            FocusId::KillAuraRangeSlider,
+            focusables,
+        );
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + third + 12.0, iy + 38.0, third, 40.0),
+            "FOV",
+            &format!("{:.0} deg", st.config.killaura_fov),
+            st.config.killaura_fov,
+            30.0,
+            360.0,
+            15.0,
+            FocusId::KillAuraFovSlider,
+            focusables,
+        );
+        draw_slider(
+            st,
+            dl,
+            atlas,
+            Rect::new(ix + (third + 12.0) * 2.0, iy + 38.0, third, 40.0),
+            "Cooldown",
+            &format!("{} ms", st.config.killaura_delay_ms),
+            st.config.killaura_delay_ms as f32,
+            250.0,
+            1200.0,
+            25.0,
+            FocusId::KillAuraDelaySlider,
+            focusables,
+        );
+    }
+    y = next_y;
+
+    y = draw_module_row(
+        st,
+        dl,
+        atlas,
+        x,
+        y,
+        w,
         "Criticals",
         "Micro-jumps on attack so hits land while falling for 1.5x damage",
         st.config.criticals_enabled,
@@ -1426,7 +1497,7 @@ fn render_search_results(
 ) -> f32 {
     y = draw_section_label(dl, atlas, x, y, w, "SEARCH RESULTS");
 
-    let items: [(&str, &str, bool, FocusId); 27] = [
+    let items: [(&str, &str, bool, FocusId); 28] = [
         ("Fullbright", "Brightens caves and night areas", st.config.fullbright_enabled, FocusId::FullbrightToggle),
         ("Ore X-Ray", "3D boxes for buried Diamond, Debris, Gold, Iron", st.config.xray_ores, FocusId::XrayOresToggle),
         ("Cave Wireframe", "See underground tunnels and lava pockets", st.config.xray_terrain, FocusId::XrayTerrainToggle),
@@ -1435,6 +1506,7 @@ fn render_search_results(
         ("Tracers", "Guide lines to nearby players and mobs", st.config.tracers_enabled, FocusId::TracersToggle),
         ("Freecam", "Scout freely while your character stays still", st.config.freecam_enabled, FocusId::FreecamToggle),
         ("AimAssist", "Gently aims toward nearby targets", st.config.aim_assist, FocusId::AimAssistToggle),
+        ("KillAura", "Automatically turns and attacks nearby targets", st.config.killaura_enabled, FocusId::KillAuraToggle),
         ("Criticals", "Micro-jump on attack for 1.5x critical hits", st.config.criticals_enabled, FocusId::CriticalsToggle),
         ("Entity Radar", "Top-down minimap of players and mobs", st.config.hud_radar.enabled, FocusId::HudToggleRadar),
         ("AutoSprint", "Keeps sprint active while moving forward", st.config.auto_sprint, FocusId::AutoSprintToggle),
@@ -2199,6 +2271,15 @@ fn apply_slider_pos(
         FocusId::AimSmoothSlider => {
             st.config.aim_smooth = snapped;
         }
+        FocusId::KillAuraRangeSlider => {
+            st.config.killaura_range = snapped;
+        }
+        FocusId::KillAuraFovSlider => {
+            st.config.killaura_fov = snapped;
+        }
+        FocusId::KillAuraDelaySlider => {
+            st.config.killaura_delay_ms = snapped.round() as u32;
+        }
         FocusId::AutoClickerCpsSlider => {
             st.config.auto_clicker_cps = snapped.round() as u32;
         }
@@ -2255,6 +2336,16 @@ fn nudge_slider(st: &mut AppState, fid: FocusId, delta: f32, min: f32, max: f32)
         FocusId::AimSmoothSlider => {
             st.config.aim_smooth = (st.config.aim_smooth + delta).clamp(min, max);
         }
+        FocusId::KillAuraRangeSlider => {
+            st.config.killaura_range = (st.config.killaura_range + delta).clamp(min, max);
+        }
+        FocusId::KillAuraFovSlider => {
+            st.config.killaura_fov = (st.config.killaura_fov + delta).clamp(min, max);
+        }
+        FocusId::KillAuraDelaySlider => {
+            let next = (st.config.killaura_delay_ms as f32 + delta).clamp(min, max);
+            st.config.killaura_delay_ms = next.round() as u32;
+        }
         FocusId::AutoClickerCpsSlider => {
             let next = (st.config.auto_clicker_cps as f32 + delta).clamp(min, max);
             st.config.auto_clicker_cps = next.round() as u32;
@@ -2290,6 +2381,7 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
             st.config.criticals_enabled = false;
             st.config.freecam_enabled = false;
             st.config.aim_assist = false;
+            st.config.killaura_enabled = false;
             st.freecam_offset = [0.0; 3];
             st.config.auto_sprint = false;
             st.config.auto_respawn = false;
@@ -2397,6 +2489,9 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         FocusId::AimAssistToggle => {
             st.config.aim_assist = !st.config.aim_assist;
         }
+        FocusId::KillAuraToggle => {
+            st.config.killaura_enabled = !st.config.killaura_enabled;
+        }
         FocusId::AutoMineToggle => {
             st.config.auto_mine = !st.config.auto_mine;
         }
@@ -2408,11 +2503,10 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         }
         FocusId::SpeedMinePowerSlider => {}
         FocusId::AimTargetCycle => {
-            st.config.aim_target = match st.config.aim_target {
-                AimTarget::Hostile => AimTarget::Players,
-                AimTarget::Players => AimTarget::Both,
-                AimTarget::Both => AimTarget::Hostile,
-            };
+            st.config.aim_target = cycle_aim_target(st.config.aim_target);
+        }
+        FocusId::KillAuraTargetCycle => {
+            st.config.killaura_target = cycle_aim_target(st.config.killaura_target);
         }
         FocusId::XrayKeyCycle => {
             st.config.xray_key = match st.config.xray_key {
@@ -2532,6 +2626,9 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
         | FocusId::AimFovSlider
         | FocusId::AimRangeSlider
         | FocusId::AimSmoothSlider
+        | FocusId::KillAuraRangeSlider
+        | FocusId::KillAuraFovSlider
+        | FocusId::KillAuraDelaySlider
         | FocusId::AutoEatHungerSlider
         | FocusId::TriggerBotDelaySlider
         | FocusId::AutoClickerCpsSlider => {
@@ -2540,5 +2637,13 @@ fn activate_control(st: &mut AppState, fid: FocusId) {
     }
     if save {
         let _ = st.config.save();
+    }
+}
+
+fn cycle_aim_target(current: AimTarget) -> AimTarget {
+    match current {
+        AimTarget::Hostile => AimTarget::Players,
+        AimTarget::Players => AimTarget::Both,
+        AimTarget::Both => AimTarget::Hostile,
     }
 }
